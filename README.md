@@ -1,16 +1,19 @@
 # SongMetadata
 
+[![python](https://img.shields.io/badge/python-3-blue)](https://www.python.org/) [![platform](https://img.shields.io/badge/platform-Windows-blue)](https://github.com/waves-dylan/SongMetadata) [![license](https://img.shields.io/github/license/waves-dylan/SongMetadata)](https://github.com/waves-dylan/SongMetadata/blob/main/LICENSE) [![stars](https://img.shields.io/github/stars/waves-dylan/SongMetadata?style=flat&label=stars)](https://github.com/waves-dylan/SongMetadata) [![forks](https://img.shields.io/github/forks/waves-dylan/SongMetadata?style=flat&label=forks)](https://github.com/waves-dylan/SongMetadata/forks) [![watchers](https://img.shields.io/github/watchers/waves-dylan/SongMetadata?style=flat&label=watchers)](https://github.com/waves-dylan/SongMetadata)
+
 统一集成 **foobar2000 元数据检查与缓存刷新**、**封面规范化修复**（含单专辑 `cover.jpg` 与分组标签补全）以及 **多平台音轨号联网补全** 的手动媒体库修复工具（GUI + CLI）。
 
 ## 使用方法
 
 - **图形界面（推荐）**：直接双击运行 `SongMetadata.exe`（或运行 `python app.py`）。
-  - 打开后不会自动扫描媒体库；点击 **「扫描媒体库」**（或右上角 **「选择目录...」**）后才开始扫描，扫描完成后可在 **「修复项选择」** 栏按需单独勾选/取消：**封面**、**日期**、**专辑艺术家**、**艺术家**、**作曲**、**表演者**、**流派**、**音轨号**、**碟片编号**（支持「全选」/「全不选」及「刷新 foobar 缓存」）。
-  - 点击 **「一键修复已选项目」** 按勾选模块统一修复；或点击 **「仅刷新 foobar 缓存」** 仅推进文件修改时间并触发 foobar2000 重载磁盘元数据（不修改音频标签与封面）。
+  - 打开后不会自动扫描媒体库；点击 **「扫描媒体库」**（或右上角 **「选择目录...」**）后才开始扫描，扫描完成后可在 **「修复项选择」** 栏按需单独勾选/取消：**封面**、**日期**、**专辑艺术家**、**艺术家**、**作曲**、**表演者**、**流派**、**音轨号**、**碟片编号**（支持「全选」/「全不选」及「刷新 foobar 缓存」；该栏仅控制 **「一键修复已选项目」** 的修复模块以及列表筛选/默认勾选）。
+  - 点击 **「一键修复已选项目」** 按「修复项选择」的勾选模块统一修复；点击 **「仅刷新 foobar 缓存」** 仅推进文件修改时间并触发 foobar2000 重载磁盘元数据（不修改音频标签与封面）；点击 **「删除部分元数据...」** 会弹出独立选择窗口（与「修复项选择」互相独立，窗口内所有元数据类别**默认均不勾选**，非预演模式需二次确认），仅从已勾选曲目中按弹窗内手动勾选的类别批量删除对应条目（支持 `封面`、`标题`、`艺术家`、`专辑艺术家`、`专辑`、`日期`、`作曲`、`表演者`、`流派`、`音轨号`、`碟片编号`、`注释`，默认保留网易云 `163 key`、支持仅预演与可选删除同目录外置 `cover.jpg`）。
 - **命令行模式**：
   - 仅扫描预览待修复项（不改动任何文件）：`python app.py --dry-run`
   - 仅检查并刷新 foobar 元数据缓存：`python app.py --sync-only`
   - 一键执行全部修复：`python app.py --auto`
+  - 删除部分元数据类别条目：`python app.py --delete composer,performer,comment --folder "F:\Music"`（可搭配 `--dry-run`、`--delete-folder-cover`、`--no-protect-163`、`--no-sync`、`--include-full-album`）
   - 自由组合开关：`--no-track`、`--no-art`、`--no-date`、`--no-albumartist`、`--no-artist`、`--no-composer`、`--no-performer`、`--no-genre`、`--no-disc`、`--no-tags`、`--no-extra-tags`、`--no-sync`、`--folder "F:\Music"`
 
 ## 核心能力

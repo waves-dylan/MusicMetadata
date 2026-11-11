@@ -8,6 +8,7 @@ import os
 import re
 from base64 import b64decode, b64encode
 from collections import Counter, OrderedDict
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 
 from PIL import Image
@@ -19,6 +20,7 @@ from tag_io import (
     LOADERS,
     _as_text,
     _id3_text,
+    _remove_file_with_retry,
     _tag_text,
     apply_track_to_audio,
     atomic_mutate_audio,
@@ -61,6 +63,46 @@ _TAG_WRITE_TABLE = {
 _ID3_WRITE_TABLE = {
     'album': ('TALB', TALB), 'albumartist': ('TPE2', TPE2), 'artist': ('TPE1', TPE1),
     'title': ('TIT2', TIT2), 'date': ('TDRC', TDRC), 'composer': ('TCOM', TCOM), 'genre': ('TCON', TCON),
+}
+
+DELETABLE_FIELDS: tuple[str, ...] = (
+    'cover', 'title', 'artist', 'albumartist', 'album', 'date',
+    'composer', 'performer', 'genre', 'tracknumber', 'discnumber', 'comment',
+)
+
+_TAG_DELETE_KEYS = {
+    'vorbis': {
+        'title': ('TITLE',), 'artist': ('ARTIST',), 'albumartist': ('ALBUMARTIST', 'ALBUM ARTIST'),
+        'album': ('ALBUM',), 'date': ('DATE', 'YEAR'),
+        'composer': ('COMPOSER',), 'performer': ('PERFORMER',), 'genre': ('GENRE',),
+        'tracknumber': ('TRACKNUMBER', 'TRACK'), 'discnumber': ('DISCNUMBER', 'DISC'),
+        'comment': ('COMMENT', 'DESCRIPTION'),
+    },
+    'mp4': {
+        'title': ('\xa9nam',), 'artist': ('\xa9ART',), 'albumartist': ('aART',),
+        'album': ('\xa9alb',), 'date': ('\xa9day',),
+        'composer': ('\xa9wrt',), 'performer': ('----:com.apple.iTunes:PERFORMER',), 'genre': ('\xa9gen',),
+        'tracknumber': ('trkn',), 'discnumber': ('disk',), 'comment': ('\xa9cmt',),
+    },
+    'asf': {
+        'title': ('Title',), 'artist': ('Author',), 'albumartist': ('WM/AlbumArtist',),
+        'album': ('WM/AlbumTitle',), 'date': ('WM/Year',),
+        'composer': ('WM/Composer',), 'performer': ('WM/Performer', 'Performer'), 'genre': ('WM/Genre',),
+        'tracknumber': ('WM/TrackNumber',), 'discnumber': ('WM/PartOfSet',), 'comment': ('Description',),
+    },
+    'ape': {
+        'title': ('Title', 'TITLE'), 'artist': ('Artist', 'ARTIST'),
+        'albumartist': ('Album Artist', 'ALBUM ARTIST', 'ALBUMARTIST'), 'album': ('Album', 'ALBUM'),
+        'date': ('Year', 'DATE'), 'composer': ('Composer', 'COMPOSER'),
+        'performer': ('Performer', 'PERFORMER'), 'genre': ('Genre', 'GENRE'),
+        'tracknumber': ('Track', 'TRACK', 'TRACKNUMBER'),
+        'discnumber': ('Disc', 'DISC', 'DISCNUMBER'), 'comment': ('Comment', 'COMMENT'),
+    },
+}
+_ID3_DELETE_KEYS = {
+    'title': ('TIT2',), 'artist': ('TPE1',), 'albumartist': ('TPE2',), 'album': ('TALB',),
+    'date': ('TDRC', 'TYER', 'TDAT'), 'composer': ('TCOM',), 'genre': ('TCON',),
+    'tracknumber': ('TRCK',), 'discnumber': ('TPOS',),
 }
 
 
@@ -565,3 +607,297 @@ def apply_track_repairs(
     if ok:
         cleanup_stale_musictmp_for(path)
     return ok, msg
+
+
+def _container_family(audio, container: str) -> str:
+    if container in ('flac', 'ogg', 'opus'):
+        return 'vorbis'
+    if container == 'mp4' or isinstance(audio, MP4):
+        return 'mp4'
+    if container == 'asf':
+        return 'asf'
+    if container in ('ape', 'wv'):
+        return 'ape'
+    return ''
+
+
+def _audio_has_pictures(audio, container: str) -> bool:
+    if read_pictures(audio, container):
+        return True
+    tags = getattr(audio, 'tags', None)
+    if tags is None:
+        return False
+    if container == 'flac':
+        return any(str(k).lower() == 'metadata_block_picture' for k in tags.keys())
+    if container == 'asf':
+        return any(str(k).lower() == 'wm/picture' for k in tags.keys())
+    if container in ('ape', 'wv'):
+        return any(str(k).lower() in ('cover art (front)', 'cover art (back)') for k in tags.keys())
+    return False
+
+
+def _has_comment_entries(audio, container: str) -> tuple[bool, bool]:
+    """返回音频中 (是否存在非163key注释, 是否存在网易云163key)。"""
+    tags = getattr(audio, 'tags', None)
+    if tags is None:
+        return False, False
+    has_unprot = False
+    has_163 = False
+    if container in ('mp3', 'wav', 'aiff') or isinstance(tags, ID3):
+        for f in tags.getall('COMM'):
+            txt = _as_text(getattr(f, 'text', None) or str(f))
+            if '163 key' in txt:
+                has_163 = True
+            elif txt:
+                has_unprot = True
+        return has_unprot, has_163
+
+    fam = _container_family(audio, container)
+    keys = _TAG_DELETE_KEYS.get(fam, {}).get('comment', ())
+    target_lower = {k.lower() for k in keys}
+    for k in list(tags.keys()):
+        if str(k).lower() not in target_lower:
+            continue
+        val = tags.get(k)
+        items = list(val) if (hasattr(val, '__iter__') and not isinstance(val, (str, bytes, bytearray))) else [val]
+        for item in items:
+            txt = str(item).strip()
+            if '163 key' in txt:
+                has_163 = True
+            elif txt:
+                has_unprot = True
+    return has_unprot, has_163
+
+
+def delete_pictures_from_audio(audio, container: str) -> bool:
+    """移除音频中的全部内嵌封面图片或封面标签。"""
+    removed = False
+    if container == 'flac' or isinstance(audio, FLAC):
+        if getattr(audio, 'pictures', None):
+            audio.clear_pictures()
+            removed = True
+        tags = getattr(audio, 'tags', None)
+        if tags is not None:
+            for k in [k for k in list(tags.keys()) if str(k).lower() == 'metadata_block_picture']:
+                del tags[k]
+                removed = True
+        return removed
+
+    tags = getattr(audio, 'tags', None)
+    if tags is None:
+        return False
+    if container == 'mp4' or isinstance(audio, MP4):
+        for k in [k for k in list(tags.keys()) if str(k).lower() == 'covr']:
+            del tags[k]
+            removed = True
+        return removed
+    if container in ('mp3', 'wav', 'aiff') or isinstance(tags, ID3):
+        if tags.getall('APIC'):
+            tags.delall('APIC')
+            return True
+        return False
+    if container in ('ogg', 'opus'):
+        for k in [k for k in list(tags.keys()) if str(k).lower() == 'metadata_block_picture']:
+            del tags[k]
+            removed = True
+        return removed
+    if container == 'asf':
+        for k in [k for k in list(tags.keys()) if str(k).lower() == 'wm/picture']:
+            del tags[k]
+            removed = True
+        return removed
+    if container in ('ape', 'wv'):
+        for k in [k for k in list(tags.keys()) if str(k).lower() in ('cover art (front)', 'cover art (back)')]:
+            del tags[k]
+            removed = True
+        return removed
+    return False
+
+
+def delete_tag_field_from_audio(
+    audio, container: str, field_name: str, *, protect_163_key: bool = True,
+) -> bool:
+    """从已打开的音频对象中删除指定类别元数据标签，返回是否发生实际删除。"""
+    if field_name == 'cover':
+        return delete_pictures_from_audio(audio, container)
+    tags = getattr(audio, 'tags', None)
+    if tags is None:
+        return False
+
+    if container in ('mp3', 'wav', 'aiff') or isinstance(tags, ID3):
+        if field_name == 'performer':
+            removed = False
+            kept_txxx = []
+            for f in tags.getall('TXXX'):
+                if str(getattr(f, 'desc', '') or '').strip().upper() == 'PERFORMER':
+                    removed = True
+                else:
+                    kept_txxx.append(f)
+            if removed:
+                tags.setall('TXXX', kept_txxx)
+            for fid in ('TMCL', 'TIPL', 'IPLS'):
+                if tags.getall(fid):
+                    tags.delall(fid)
+                    removed = True
+            return removed
+        if field_name == 'comment':
+            frames = tags.getall('COMM')
+            if not frames:
+                return False
+            if protect_163_key:
+                kept = [f for f in frames if '163 key' in _as_text(getattr(f, 'text', None) or str(f))]
+                if len(kept) == len(frames):
+                    return False
+                tags.setall('COMM', kept)
+                return True
+            tags.delall('COMM')
+            return True
+        fids = _ID3_DELETE_KEYS.get(field_name, ())
+        removed = False
+        for fid in fids:
+            if tags.getall(fid):
+                tags.delall(fid)
+                removed = True
+        return removed
+
+    fam = _container_family(audio, container)
+    keys = _TAG_DELETE_KEYS.get(fam, {}).get(field_name, ())
+    if not keys:
+        return False
+    target_lower = {k.lower() for k in keys}
+    matched_keys = [k for k in list(tags.keys()) if str(k).lower() in target_lower]
+    if not matched_keys:
+        return False
+
+    if field_name == 'comment' and protect_163_key:
+        removed = False
+        for k in matched_keys:
+            val = tags.get(k)
+            items = list(val) if (hasattr(val, '__iter__') and not isinstance(val, (str, bytes, bytearray))) else [val]
+            kept = [x for x in items if '163 key' in str(x)]
+            if len(kept) == len(items):
+                continue
+            if not kept:
+                del tags[k]
+            else:
+                tags[k] = [str(x) for x in kept] if fam == 'ape' else kept
+            removed = True
+        return removed
+
+    for k in matched_keys:
+        del tags[k]
+    return True
+
+
+def inspect_deletable_fields(
+    path: str, fields: Iterable[str], *, protect_163_key: bool = True,
+) -> tuple[dict, list[str], list[str]]:
+    """只读检查音频文件实际包含哪些可删除的指定元数据类别。"""
+    req = [f for f in DELETABLE_FIELDS if f in set(fields)]
+    info = read_audio_info(path)
+    if info.get('error') or not req:
+        return info, [], []
+
+    container = info.get('container')
+    loader = LOADERS.get(container) if container else None
+    audio = None
+    if loader is not None and ('cover' in req or ('comment' in req and info.get('has_163_key'))):
+        try:
+            audio = loader(path)
+        except Exception:
+            audio = None
+
+    deletable: list[str] = []
+    protected_notes: list[str] = []
+    for fn in req:
+        if fn == 'cover':
+            if audio is not None and _audio_has_pictures(audio, container):
+                deletable.append('cover')
+        elif fn == 'comment':
+            if audio is not None:
+                has_unprot, has_163 = _has_comment_entries(audio, container)
+                if has_163 and protect_163_key:
+                    protected_notes.append('保留网易云 163 key')
+                if has_unprot or (has_163 and not protect_163_key):
+                    deletable.append('comment')
+            else:
+                if (info.get('comment') or '').strip() or (not protect_163_key and (info.get('raw_comment') or '').strip()):
+                    deletable.append('comment')
+                elif protect_163_key and info.get('has_163_key'):
+                    protected_notes.append('保留网易云 163 key')
+        else:
+            if (info.get(fn) or '').strip():
+                deletable.append(fn)
+    return info, deletable, protected_notes
+
+
+def apply_track_deletions(
+    path: str,
+    fields: Iterable[str],
+    *,
+    protect_163_key: bool = True,
+    out_deleted: list[str] | None = None,
+) -> tuple[bool, str]:
+    """在单次原子临时副本上批量删除指定元数据类别并回读校验。"""
+    state, deletable, protected_notes = inspect_deletable_fields(path, fields, protect_163_key=protect_163_key)
+    if state.get('error'):
+        return False, str(state['error'])
+    if not deletable:
+        return True, '；'.join(protected_notes) if protected_notes else '无所选元数据可删'
+
+    had_163_before = bool(state.get('has_163_key'))
+    applied_fields: list[str] = []
+
+    def _mutate(audio, container: str, _tmp: str):
+        applied_fields.clear()
+        for fn in deletable:
+            if delete_tag_field_from_audio(audio, container, fn, protect_163_key=protect_163_key):
+                applied_fields.append(fn)
+        if not applied_fields:
+            return False, '；'.join(protected_notes) if protected_notes else '无所选元数据可删'
+        msg = '已删除: ' + ', '.join(applied_fields)
+        if protected_notes:
+            msg += f"（{'；'.join(protected_notes)}）"
+        return True, msg
+
+    def _verify(chk_path: str, container: str):
+        text_fields = [f for f in applied_fields if f != 'cover']
+        chk_info = read_audio_info(chk_path) if text_fields else {}
+        if 'cover' in applied_fields:
+            chk_audio = LOADERS[container](chk_path)
+            if _audio_has_pictures(chk_audio, container):
+                return False, '封面删除校验失败'
+        for fn in text_fields:
+            if fn == 'comment':
+                if protect_163_key:
+                    chk_audio = LOADERS[container](chk_path)
+                    has_unprot, has_163 = _has_comment_entries(chk_audio, container)
+                    if has_unprot:
+                        return False, 'comment 标签删除校验失败'
+                    if had_163_before and not has_163:
+                        return False, '网易云 163 key 保护校验失败'
+                else:
+                    if (chk_info.get('comment') or '').strip() or (chk_info.get('raw_comment') or '').strip():
+                        return False, 'comment 标签删除校验失败'
+            elif (chk_info.get(fn) or '').strip():
+                return False, f'{fn} 标签删除校验失败'
+        return True, ''
+
+    ok, msg = atomic_mutate_audio(path, _mutate, verify_fn=_verify)
+    if ok:
+        cleanup_stale_musictmp_for(path)
+        if out_deleted is not None:
+            out_deleted.extend(applied_fields)
+    return ok, msg
+
+
+def delete_folder_cover_file(folder: str) -> tuple[bool, str]:
+    """删除目录下外置 cover.jpg 文件。"""
+    if not folder:
+        return True, '无需删除外置封面'
+    cover_path = os.path.join(folder, 'cover.jpg')
+    if not os.path.isfile(cover_path):
+        return True, '目录无外置 cover.jpg'
+    if _remove_file_with_retry(cover_path, attempts=4, base_delay=0.15):
+        return True, '已删除目录 cover.jpg'
+    return False, '删除目录 cover.jpg 失败'

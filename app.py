@@ -16,11 +16,28 @@ from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from tkinter import filedialog, messagebox, ttk
 
-from art_repair import MAX_SIDE, FolderArtPlan, apply_folder_cover_file, apply_track_repairs, normalize_jpeg, pick_canonical_album_date
+from art_repair import (
+    DELETABLE_FIELDS,
+    MAX_SIDE,
+    SUPPORTS_COVER_WRITE,
+    FolderArtPlan,
+    analyze_folder_art_and_tags,
+    apply_folder_cover_file,
+    apply_track_deletions,
+    apply_track_repairs,
+    delete_folder_cover_file,
+    inspect_deletable_fields,
+    normalize_jpeg,
+    pick_canonical_album_date,
+)
 from foobar_library import (
+    CORE_TEXT_FIELDS,
+    EXTRA_TEXT_FIELDS,
     FIELD_LABELS,
     STATUS_ERROR,
+    STATUS_MISSING_DISK,
     STATUS_OK,
+    STATUS_STALE_FOOBAR,
     FoobarEnv,
     LibraryTrack,
     detect_foobar_env,
@@ -29,6 +46,7 @@ from foobar_library import (
     sync_files_to_foobar,
     track_has_pending_work,
 )
+from tag_io import has_valid_tracknumber, read_audio_info
 from track_lookup import TrackMatch, clear_caches, fetch_cover_bytes, resolve_track_metadata
 
 FOLDER_COVER_LABELS = {
@@ -87,6 +105,47 @@ def default_checked(track: LibraryTrack, skip_full_album: bool = True, options: 
         enable_extra_tags=(opts.enable_tags and opts.enable_extra_tags),
         enabled_tag_fields=opts.active_tag_fields(),
     )
+
+
+@dataclass
+class DeleteOptions:
+    fields: frozenset[str] = frozenset()
+    delete_folder_cover: bool = False
+    protect_163_key: bool = True
+    enable_sync: bool = True
+    dry_run: bool = False
+
+
+_DELETE_FIELD_ALIASES = {
+    'art': 'cover',
+    'album_artist': 'albumartist',
+    'track': 'tracknumber',
+    'disc': 'discnumber',
+    'year': 'date',
+    'comments': 'comment',
+    **{v: k for k, v in FIELD_LABELS.items()},
+}
+
+
+def parse_delete_fields(raw_items: list[str] | tuple[str, ...] | str) -> tuple[list[str], list[str]]:
+    """解析命令行/外部传入的待删除元数据类别名称，返回 (有效字段列表, 无效标记列表)。"""
+    items = [raw_items] if isinstance(raw_items, str) else list(raw_items or ())
+    requested: set[str] = set()
+    invalid: list[str] = []
+    valid_set = set(DELETABLE_FIELDS)
+    for item in items:
+        for raw_tok in str(item or '').replace('，', ',').replace(';', ',').split(','):
+            tok = raw_tok.strip()
+            if not tok:
+                continue
+            low = tok.lower()
+            mapped = low if low in valid_set else _DELETE_FIELD_ALIASES.get(low) or _DELETE_FIELD_ALIASES.get(tok)
+            if mapped in valid_set:
+                requested.add(mapped)
+            elif tok not in invalid:
+                invalid.append(tok)
+    ordered = [f for f in DELETABLE_FIELDS if f in requested]
+    return ordered, invalid
 
 
 def _format_status_badge(tr: LibraryTrack) -> tuple[str, str]:
@@ -588,6 +647,301 @@ def execute_repairs(
             'folder_cover_fail': folder_cover_fail, 'synced_stale': synced_stale, 'touched': touched, 'reloaded': reloaded}
 
 
+def execute_deletions(
+    env: FoobarEnv, targets: list[LibraryTrack], options: DeleteOptions,
+    progress_cb=None, row_cb=None, log_cb=None, is_cancelled_cb=None,
+) -> dict:
+    """批量删除指定曲目中选定元数据类别的条目（支持预演、163 key 保护、外置封面清理与 foobar 刷新）。"""
+    fields = [f for f in DELETABLE_FIELDS if f in options.fields]
+    total = len(targets)
+    cancelled = False
+    emit_log = log_cb or (lambda _m: None)
+    emit_row = row_cb or (lambda _p, _d: None)
+    is_cancel = is_cancelled_cb or (lambda: False)
+
+    deleted_ok = deleted_skipped = deleted_fail = folder_cover_deleted = folder_cover_fail = 0
+    field_counts: dict[str, int] = {f: 0 for f in fields}
+    modified_paths: list[str] = []
+    synced_paths: list[str] = []
+    foobar_mtimes: dict[str, float] = {}
+
+    if not fields:
+        return {
+            'cancelled': False, 'dry_run': options.dry_run,
+            'deleted_ok': 0, 'deleted_skipped': total, 'deleted_fail': 0,
+            'folder_cover_deleted': 0, 'folder_cover_fail': 0,
+            'field_counts': field_counts, 'modified_paths': (), 'touched': 0, 'reloaded': False,
+        }
+
+    field_desc = '、'.join(FIELD_LABELS.get(f, f) for f in fields)
+    emit_log(f"{'[预演]' if options.dry_run else '开始'}批量删除部分元数据（共 {total} 首，类别：{field_desc}）...")
+
+    if options.delete_folder_cover and 'cover' in fields:
+        seen_folders = list(dict.fromkeys(
+            tr.folder for tr in targets
+            if tr.folder and tr.status != STATUS_ERROR and not tr.is_temp_duplicate
+        ))
+        for folder in seen_folders:
+            if is_cancel():
+                cancelled = True
+                break
+            cov_path = os.path.join(folder, 'cover.jpg')
+            if not os.path.isfile(cov_path):
+                continue
+            if options.dry_run:
+                folder_cover_deleted += 1
+                emit_log(f'[预演][目录封面] {folder} -> 将删除 cover.jpg')
+            else:
+                ok_d, msg_d = delete_folder_cover_file(folder)
+                if ok_d:
+                    folder_cover_deleted += 1
+                    emit_log(f'[目录封面] {folder} -> {msg_d}')
+                else:
+                    folder_cover_fail += 1
+                    emit_log(f'[目录封面失败] {folder} -> {msg_d}')
+
+    for idx, tr in enumerate(targets, 1):
+        if cancelled or is_cancel():
+            cancelled = True
+            break
+        if progress_cb:
+            progress_cb(idx, total, tr.filename)
+        if tr.status == STATUS_ERROR or tr.is_temp_duplicate:
+            deleted_skipped += 1
+            continue
+
+        if options.dry_run:
+            info, deletable, protected_notes = inspect_deletable_fields(
+                tr.path, fields, protect_163_key=options.protect_163_key,
+            )
+            if info.get('error'):
+                deleted_fail += 1
+                emit_row(tr.path, {'status_text': '读取失败', 'source_note': str(info['error']), 'color': 'err'})
+                emit_log(f"[删除失败] {tr.filename} -> {info['error']}")
+                continue
+            if not deletable:
+                deleted_skipped += 1
+                note = '；'.join(protected_notes) if protected_notes else '无所选元数据可删'
+                emit_row(tr.path, {'status_text': '跳过删除', 'source_note': note, 'color': 'muted'})
+                emit_log(f'[预演][跳过] {tr.filename} -> {note}')
+                continue
+            deleted_ok += 1
+            for f in deletable:
+                field_counts[f] = field_counts.get(f, 0) + 1
+            lbls = ', '.join(FIELD_LABELS.get(f, f) for f in deletable)
+            extra = f"（{'；'.join(protected_notes)}）" if protected_notes else ''
+            emit_row(tr.path, {'status_text': '预演删除', 'source_note': f'将删除: {lbls}{extra}', 'color': 'info'})
+            emit_log(f'[预演删除] {tr.filename} -> 将删除: {lbls}{extra}')
+            continue
+
+        actually_deleted: list[str] = []
+        ok, msg = apply_track_deletions(
+            tr.path, fields, protect_163_key=options.protect_163_key, out_deleted=actually_deleted,
+        )
+        if ok and actually_deleted:
+            deleted_ok += 1
+            modified_paths.append(tr.path)
+            for f in actually_deleted:
+                field_counts[f] = field_counts.get(f, 0) + 1
+            if options.enable_sync:
+                synced_paths.append(tr.path)
+                foobar_mtimes[os.path.normcase(os.path.abspath(tr.path))] = max(tr.foobar_mtime, tr.disk_mtime)
+            new_info = read_audio_info(tr.path)
+            emit_row(tr.path, {
+                'status_text': '已删除', 'source_note': msg, 'color': 'ok',
+                'deleted_fields': list(actually_deleted), 'new_info': new_info, 'synced': options.enable_sync,
+            })
+            emit_log(f'[已删除] {tr.filename} -> {msg}')
+        elif ok:
+            deleted_skipped += 1
+            emit_row(tr.path, {'status_text': '跳过删除', 'source_note': msg, 'color': 'muted'})
+            emit_log(f'[跳过] {tr.filename} -> {msg}')
+        else:
+            deleted_fail += 1
+            emit_row(tr.path, {'status_text': '删除失败', 'source_note': msg, 'color': 'err'})
+            emit_log(f'[删除失败] {tr.filename} -> {msg}')
+
+    touched, reloaded = (0, False)
+    if not options.dry_run and synced_paths and not cancelled:
+        unique = list(dict.fromkeys(synced_paths))
+        emit_log(f'正在同步 {len(unique)} 个变更文件到 foobar2000...')
+        touched, reloaded = sync_files_to_foobar(env, unique, foobar_mtimes)
+        emit_log(f'已更新时间戳 ({touched} 个)' + ('并触发运行中的 foobar2000 重载。' if reloaded else '；foobar 下次启动会自动读取。'))
+
+    return {
+        'cancelled': cancelled, 'dry_run': options.dry_run,
+        'deleted_ok': deleted_ok, 'deleted_skipped': deleted_skipped, 'deleted_fail': deleted_fail,
+        'folder_cover_deleted': folder_cover_deleted, 'folder_cover_fail': folder_cover_fail,
+        'field_counts': field_counts, 'modified_paths': tuple(modified_paths),
+        'touched': touched, 'reloaded': reloaded,
+    }
+
+
+def _count_deletable_targets(targets: list[LibraryTrack]) -> tuple[dict[str, int], int, int]:
+    counts: dict[str, int] = {f: 0 for f in DELETABLE_FIELDS}
+    count_163 = 0
+    seen_folders: set[str] = set()
+    folder_cover_count = 0
+    for tr in targets:
+        if tr.status == STATUS_ERROR or tr.is_temp_duplicate:
+            continue
+        if tr.folder and tr.folder not in seen_folders:
+            seen_folders.add(tr.folder)
+            if os.path.isfile(os.path.join(tr.folder, 'cover.jpg')):
+                folder_cover_count += 1
+        if tr.has_163_key:
+            count_163 += 1
+        if not tr.cover_status.startswith('缺封面') and 'no-cover' not in tr.cover_reasons and 'no-cover-source' not in tr.cover_reasons:
+            counts['cover'] += 1
+        for f in ('title', 'artist', 'albumartist', 'album', 'date', 'composer', 'performer', 'genre', 'comment'):
+            if (getattr(tr, f, '') or '').strip():
+                counts[f] += 1
+        if (tr.disk_tracknumber or '').strip() or tr.disk_track_int is not None:
+            counts['tracknumber'] += 1
+        if (tr.disk_discnumber or '').strip() or tr.disk_disc_int is not None:
+            counts['discnumber'] += 1
+    return counts, count_163, folder_cover_count
+
+
+class DeleteMetadataDialog:
+    """选择要删除的部分元数据类别与安全选项的模态弹窗。"""
+
+    _GRID_ORDER = (
+        'title', 'artist', 'albumartist', 'album',
+        'date', 'tracknumber', 'discnumber', 'genre',
+        'composer', 'performer', 'comment', 'cover',
+    )
+
+    def __init__(self, parent: tk.Misc, targets: list[LibraryTrack], default_sync: bool = True):
+        self.targets = targets
+        self.result: DeleteOptions | None = None
+
+        self.top = tk.Toplevel(parent)
+        self.top.title('删除部分元数据')
+        self.top.transient(parent)
+        self.top.grab_set()
+        self.top.resizable(False, False)
+        self.top.protocol('WM_DELETE_WINDOW', self._on_cancel)
+        self.top.bind('<Escape>', lambda _e: self._on_cancel())
+
+        counts, count_163, folder_cover_count = _count_deletable_targets(targets)
+
+        outer = ttk.Frame(self.top, padding=14)
+        outer.pack(fill='both', expand=True)
+
+        ttk.Label(
+            outer,
+            text=f'已选择 {len(targets)} 首曲目。请勾选要删除的元数据类别条目（未勾选类别保持不变）：',
+            font=('Microsoft YaHei UI', 9, 'bold'),
+        ).pack(anchor='w', pady=(0, 8))
+
+        cat_frame = ttk.LabelFrame(outer, text='元数据类别', padding=(10, 8))
+        cat_frame.pack(fill='x', pady=(0, 8))
+
+        self.field_vars: dict[str, tk.BooleanVar] = {}
+        self.field_checks: dict[str, ttk.Checkbutton] = {}
+        grid_frm = ttk.Frame(cat_frame)
+        grid_frm.pack(fill='x')
+        for idx, key in enumerate(self._GRID_ORDER):
+            var = tk.BooleanVar(value=False)
+            self.field_vars[key] = var
+            label = FIELD_LABELS.get(key, key)
+            cmd = self._on_cover_toggled if key == 'cover' else None
+            chk = ttk.Checkbutton(grid_frm, text=f'{label} ({counts.get(key, 0)})', variable=var, command=cmd)
+            chk.grid(row=idx // 4, column=idx % 4, sticky='w', padx=(0, 14), pady=3)
+            self.field_checks[key] = chk
+
+        qbar = ttk.Frame(cat_frame)
+        qbar.pack(fill='x', pady=(6, 0))
+        self.btn_select_all = ttk.Button(qbar, text='全选', width=7, command=lambda: self._set_all(True))
+        self.btn_select_all.pack(side='left', padx=(0, 6))
+        self.btn_select_none = ttk.Button(qbar, text='全不选', width=7, command=lambda: self._set_all(False))
+        self.btn_select_none.pack(side='left')
+
+        opt_frame = ttk.LabelFrame(outer, text='安全与同步选项', padding=(10, 8))
+        opt_frame.pack(fill='x', pady=(0, 10))
+
+        self.var_protect_163 = tk.BooleanVar(value=True)
+        self.var_delete_folder_cover = tk.BooleanVar(value=False)
+        self.var_sync = tk.BooleanVar(value=default_sync)
+        self.var_dry_run = tk.BooleanVar(value=False)
+
+        p163_txt = "保护网易云 163 key（删除注释时保留 163 key(Don't modify):...）"
+        if count_163:
+            p163_txt += f'（当前含 {count_163} 首）'
+        self.chk_protect_163 = ttk.Checkbutton(opt_frame, text=p163_txt, variable=self.var_protect_163)
+        self.chk_protect_163.pack(anchor='w', pady=2)
+
+        fcov_txt = '删除封面时同时删除同目录外置 cover.jpg'
+        if folder_cover_count:
+            fcov_txt += f'（涉及 {folder_cover_count} 个）'
+        self.chk_delete_folder_cover = ttk.Checkbutton(
+            opt_frame, text=fcov_txt, variable=self.var_delete_folder_cover, state='disabled',
+        )
+        self.chk_delete_folder_cover.pack(anchor='w', pady=2)
+
+        self.chk_sync = ttk.Checkbutton(opt_frame, text='删除后刷新 foobar2000 缓存', variable=self.var_sync)
+        self.chk_sync.pack(anchor='w', pady=2)
+
+        self.chk_dry_run = ttk.Checkbutton(opt_frame, text='仅预演（预览待删除项目，不实际修改文件）', variable=self.var_dry_run)
+        self.chk_dry_run.pack(anchor='w', pady=2)
+
+        btn_bar = ttk.Frame(outer)
+        btn_bar.pack(fill='x')
+        ttk.Label(btn_bar, text='注意：实际删除会直接改写音频文件标签。', foreground='#b45309').pack(side='left')
+        self.btn_cancel = ttk.Button(btn_bar, text='取消', width=8, command=self._on_cancel)
+        self.btn_cancel.pack(side='right')
+        self.btn_confirm = tk.Button(
+            btn_bar, text='确认删除', command=self._on_confirm,
+            bg='#dc2626', fg='#ffffff', activebackground='#b91c1c', activeforeground='#ffffff',
+            relief='flat', padx=12, pady=4, font=('Microsoft YaHei UI', 9, 'bold'), cursor='hand2',
+        )
+        self.btn_confirm.pack(side='right', padx=(0, 8))
+
+    def _set_all(self, checked: bool):
+        for var in self.field_vars.values():
+            var.set(checked)
+        self._on_cover_toggled()
+
+    def _on_cover_toggled(self):
+        if self.field_vars['cover'].get():
+            self.chk_delete_folder_cover.configure(state='normal')
+        else:
+            self.var_delete_folder_cover.set(False)
+            self.chk_delete_folder_cover.configure(state='disabled')
+
+    def _on_cancel(self):
+        self.result = None
+        self.top.destroy()
+
+    def _on_confirm(self):
+        selected = frozenset(k for k, v in self.field_vars.items() if v.get())
+        if not selected:
+            messagebox.showinfo('提示', '请至少勾选一项要删除的元数据类别。', parent=self.top)
+            return
+        del_folder_cov = bool('cover' in selected and self.var_delete_folder_cover.get())
+        dry_run = self.var_dry_run.get()
+        if not dry_run:
+            names = '、'.join(FIELD_LABELS.get(f, f) for f in DELETABLE_FIELDS if f in selected)
+            if del_folder_cov:
+                names += '、同目录 cover.jpg'
+            if not messagebox.askyesno(
+                '确认删除元数据',
+                f'即将从已勾选的 {len(self.targets)} 首曲目中删除：\n{names}\n\n此操作将直接修改磁盘上的音频文件，确定继续吗？',
+                icon='warning',
+                parent=self.top,
+            ):
+                return
+        self.result = DeleteOptions(
+            fields=selected,
+            delete_folder_cover=del_folder_cov,
+            protect_163_key=self.var_protect_163.get(),
+            enable_sync=self.var_sync.get(),
+            dry_run=dry_run,
+        )
+        self.top.destroy()
+
+
 # ==================== 轻量原生界面 (tkinter) ====================
 def _resource_path(rel_path: str) -> str:
     base = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
@@ -693,6 +1047,8 @@ class MainWindow:
         self.btn_one_click.pack(side='left', padx=(0, 8))
         self.btn_sync_only = ttk.Button(acts, text='仅刷新 foobar 缓存', command=self._on_sync_only)
         self.btn_sync_only.pack(side='left', padx=(0, 6))
+        self.btn_delete_meta = ttk.Button(acts, text='删除部分元数据...', command=self._on_delete_metadata)
+        self.btn_delete_meta.pack(side='left', padx=(0, 6))
         self.btn_rescan = ttk.Button(acts, text='扫描媒体库', command=self.start_scan)
         self.btn_rescan.pack(side='left', padx=(0, 6))
         self.btn_toggle_all = ttk.Button(acts, text='全选 / 取消', command=self._toggle_select_all)
@@ -829,7 +1185,7 @@ class MainWindow:
         state = 'disabled' if busy else 'normal'
         self.btn_one_click.configure(state=state, bg='#93c5fd' if busy else '#2563eb')
         for b in (
-            self.btn_sync_only, self.btn_rescan, self.btn_pick_dir, self.btn_reset_lib,
+            self.btn_sync_only, self.btn_delete_meta, self.btn_rescan, self.btn_pick_dir, self.btn_reset_lib,
             self.btn_toggle_all, self.btn_fields_all, self.btn_fields_none, self.chk_sync,
             *self.field_buttons.values(),
         ):
@@ -879,10 +1235,18 @@ class MainWindow:
                     self.var_status.set(f'处理中 ({idx}/{tot}): {name}')
                 elif kind == 'fix_row':
                     self._on_fix_row_updated(*payload)
+                elif kind == 'del_prog':
+                    idx, tot, name = payload
+                    self._show_progress(True, tot, idx)
+                    self.var_status.set(f'删除元数据 ({idx}/{tot}): {name}')
+                elif kind == 'del_row':
+                    self._on_delete_row_updated(*payload)
                 elif kind == 'log':
                     self._log(payload)
                 elif kind == 'fix_done':
                     self._on_fix_finished(payload)
+                elif kind == 'del_done':
+                    self._on_delete_finished(payload)
         except queue.Empty:
             pass
         if self.root.winfo_exists():
@@ -1176,9 +1540,230 @@ class MainWindow:
         if summary['written_ok'] > 0 or summary['synced_stale'] > 0 or summary['folder_cover_ok'] > 0:
             messagebox.showinfo('完成', msg)
 
+    @staticmethod
+    def _recompute_track_missing(tr: LibraryTrack):
+        if tr.status == STATUS_ERROR or tr.is_temp_duplicate:
+            return
+        missing_core = [
+            f for f in CORE_TEXT_FIELDS
+            if not (getattr(tr, f, '') or '').strip() and f not in tr.tag_updates
+        ]
+        missing_extra: list[str] = []
+        for f in EXTRA_TEXT_FIELDS:
+            if f == 'discnumber':
+                if not (tr.disk_disc_int or (tr.disk_discnumber or '').strip()) and not tr.target_disc:
+                    missing_extra.append(f)
+            elif not (getattr(tr, f, '') or '').strip() and f not in tr.tag_updates:
+                missing_extra.append(f)
+        tr.missing_core_fields = missing_core
+        tr.missing_extra_fields = missing_extra
+        tr.needs_date = 'date' in missing_core
+        tr.needs_extra_tags = bool(missing_extra)
+        tr.needs_tag_fix = bool(tr.tag_updates or tr.target_disc)
+
+    def _on_delete_metadata(self):
+        if not self._has_scanned:
+            messagebox.showinfo('提示', '尚未扫描媒体库，请先点击“扫描媒体库”或“选择目录...”。')
+            return
+        targets = [t for t in self.tracks if t.path in self.checked_paths]
+        if not targets:
+            messagebox.showinfo(
+                '提示',
+                '当前没有已勾选的曲目。\n如需对正常曲目删除元数据，请先取消勾选“只显示待处理曲目”，再勾选目标曲目。',
+            )
+            return
+        dlg = DeleteMetadataDialog(self.root, targets, default_sync=self.var_sync.get())
+        self._last_delete_dialog = dlg
+        self.root.wait_window(dlg.top)
+        if dlg.result is None:
+            return
+        self._start_delete(targets, dlg.result)
+
+    def _start_delete(self, targets: list[LibraryTrack], del_opts: DeleteOptions):
+        if self._busy:
+            return
+        self._cancel_flag = False
+        self._set_busy(True, f'正在删除已选曲目元数据 (共 {len(targets)} 首)...')
+        self.btn_stop.configure(state='normal')
+        self.btn_stop.pack(side='left')
+        self._show_progress(True, len(targets), 0)
+
+        def _worker():
+            summary = execute_deletions(
+                self.env, targets, del_opts,
+                progress_cb=lambda i, t, n: self._ev_q.put(('del_prog', (i, t, n))),
+                row_cb=lambda p, d: self._ev_q.put(('del_row', (p, d))),
+                log_cb=lambda m: self._ev_q.put(('log', m)),
+                is_cancelled_cb=lambda: self._cancel_flag,
+            )
+            reanalyzed: dict[str, FolderArtPlan] = {}
+            if not del_opts.dry_run and (summary.get('deleted_ok', 0) > 0 or summary.get('folder_cover_deleted', 0) > 0):
+                mod_set = set(summary.get('modified_paths') or ())
+                touched_folders = {
+                    tr.folder for tr in targets
+                    if tr.folder and (tr.path in mod_set or (del_opts.delete_folder_cover and 'cover' in del_opts.fields))
+                }
+                for folder in touched_folders:
+                    clean_paths = [
+                        t.path for t in self.tracks
+                        if t.folder == folder and not t.is_temp_duplicate and t.status != STATUS_ERROR
+                    ]
+                    if clean_paths:
+                        reanalyzed[folder] = analyze_folder_art_and_tags(folder, clean_paths)
+            summary['reanalyzed_folders'] = reanalyzed
+            self._ev_q.put(('del_done', summary))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _on_delete_row_updated(self, path: str, payload: dict):
+        tr = next((t for t in self.tracks if t.path == path), None)
+        if tr is not None:
+            if payload.get('source_note'):
+                tr.match_note = payload['source_note']
+            if payload.get('color') == 'ok' and 'new_info' in payload:
+                new_info = payload['new_info']
+                deleted_fields = set(payload.get('deleted_fields') or ())
+                for f in ('title', 'artist', 'albumartist', 'album', 'date', 'composer', 'performer', 'genre', 'comment'):
+                    setattr(tr, f, new_info.get(f) or '')
+                tr.has_163_key = bool(new_info.get('has_163_key'))
+                tr.netease_meta = new_info.get('netease_meta')
+                tr.disk_tracknumber = new_info.get('tracknumber') or ''
+                tr.disk_track_int = new_info.get('track_int')
+                tr.disk_discnumber = new_info.get('discnumber') or ''
+                tr.disk_disc_int = new_info.get('disc_int')
+                tr.needs_tracknumber = not has_valid_tracknumber(new_info)
+                for f in deleted_fields:
+                    tr.tag_updates.pop(f, None)
+                if 'discnumber' in deleted_fields:
+                    tr.target_disc = None
+                if 'cover' in deleted_fields:
+                    tr.needs_cover_fix = False
+                    tr.cover_status = '缺封面'
+                    tr.cover_reasons = ['no-cover-source']
+                    tr.target_pic_bytes = None
+                self._recompute_track_missing(tr)
+                if payload.get('synced'):
+                    tr.needs_foobar_sync, tr.foobar_stale_reasons = False, []
+                else:
+                    tr.needs_foobar_sync = True
+                    tr.foobar_stale_reasons = ['磁盘修改时间较新']
+                if tr.needs_tracknumber:
+                    tr.status = STATUS_MISSING_DISK
+                elif tr.needs_foobar_sync:
+                    tr.status = STATUS_STALE_FOOBAR
+                else:
+                    tr.status = STATUS_OK
+                self.checked_paths.discard(path)
+
+        if self.tree.exists(path):
+            vals = list(self.tree.item(path, 'values'))
+            vals[0] = '☑' if path in self.checked_paths else '☐'
+            if payload.get('status_text'):
+                vals[1] = payload['status_text']
+            if tr is not None:
+                vals[2] = tr.title or os.path.splitext(tr.filename)[0]
+                vals[3] = tr.artist
+                vals[4] = tr.album
+                vals[5] = tr.disk_tracknumber or '无'
+                vals[6] = _format_cover_cell(tr)
+                vals[7] = _format_tag_sync_cell(tr)
+            if payload.get('source_note'):
+                vals[8] = payload['source_note']
+            self.tree.item(path, values=vals, tags=(payload.get('color', 'info'),))
+
+    def _on_delete_finished(self, summary: dict):
+        reanalyzed: dict[str, FolderArtPlan] = summary.get('reanalyzed_folders') or {}
+        if reanalyzed:
+            for tr in self.tracks:
+                f_plan = reanalyzed.get(tr.folder)
+                if f_plan is None:
+                    continue
+                tr.folder_plan = f_plan
+                tr.folder_cover_action = f_plan.cover_action
+                t_plan = f_plan.track_plans.get(os.path.normcase(os.path.abspath(tr.path)))
+                if t_plan is not None:
+                    tr.cover_reasons = list(t_plan.cover_reasons)
+                    tr.needs_cover_fix = bool(t_plan.needs_cover_fix)
+                    tr.needs_cover_online = bool(
+                        'no-cover-source' in tr.cover_reasons
+                        and tr.status != STATUS_ERROR
+                        and not tr.is_temp_duplicate
+                        and tr.container in SUPPORTS_COVER_WRITE
+                    )
+                    tr.cover_status = '缺封面(待联网)' if tr.needs_cover_online else t_plan.cover_status
+                    tr.target_pic_bytes = t_plan.target_pic_bytes
+                    tr.target_pic_mime = t_plan.target_pic_mime
+                    tr.tag_updates = dict(t_plan.tag_updates)
+                    self._recompute_track_missing(tr)
+                if self.tree.exists(tr.path):
+                    vals = list(self.tree.item(tr.path, 'values'))
+                    vals[6] = _format_cover_cell(tr)
+                    vals[7] = _format_tag_sync_cell(tr)
+                    self.tree.item(tr.path, values=vals)
+
+        self.btn_stop.pack_forget()
+        self._show_progress(False)
+        self._set_busy(False)
+        self._update_summary()
+
+        prefix = '[预演] 删除完成' if summary.get('dry_run') else '删除完成'
+        fc_part = f"，删除目录 cover.jpg {summary['folder_cover_deleted']} 个" if summary.get('folder_cover_deleted') else ''
+        msg = (
+            f"{prefix}：修改文件 {summary['deleted_ok']} 首{fc_part}，"
+            f"跳过 {summary['deleted_skipped']} 首，失败 {summary['deleted_fail'] + summary['folder_cover_fail']} 项。"
+        )
+        if summary.get('cancelled'):
+            msg = '已手动停止。' + msg
+        self._log(msg)
+        self.var_status.set(msg)
+        messagebox.showinfo('预演完成' if summary.get('dry_run') else '完成', msg)
+
 
 # ==================== 命令行模式 ====================
 def run_cli(args) -> int:
+    if getattr(args, 'delete', None):
+        del_fields, invalid = parse_delete_fields(args.delete)
+        if invalid:
+            print(f"未知的待删除元数据类别: {', '.join(invalid)}；可选: {', '.join(DELETABLE_FIELDS)}", file=sys.stderr)
+            return 2
+        if not del_fields:
+            print(f"请通过 --delete 指定至少一个元数据类别；可选: {', '.join(DELETABLE_FIELDS)}", file=sys.stderr)
+            return 2
+        if getattr(args, 'delete_folder_cover', False) and 'cover' not in del_fields:
+            print('--delete-folder-cover 需与 --delete cover 配合使用。', file=sys.stderr)
+            return 2
+
+        env = detect_foobar_env()
+        custom = [os.path.abspath(args.folder)] if args.folder else None
+        print('foobar 目录:', env.fb_dir or '未检测到')
+        print('媒体库目录:', custom or env.library_folders)
+        if not custom and env.unavailable_folders:
+            print('不可访问的媒体库目录:', env.unavailable_folders)
+
+        tracks = scan_library(env, folders=custom, include_art_scan=('cover' in del_fields))
+        skip_full = not args.include_full_album
+        targets = [
+            t for t in tracks
+            if t.status != STATUS_ERROR and not t.is_temp_duplicate and not (skip_full and t.is_full_album)
+        ]
+        del_opts = DeleteOptions(
+            fields=frozenset(del_fields),
+            delete_folder_cover=bool(getattr(args, 'delete_folder_cover', False)),
+            protect_163_key=not getattr(args, 'no_protect_163', False),
+            enable_sync=not args.no_sync,
+            dry_run=args.dry_run,
+        )
+        lbls = '、'.join(FIELD_LABELS.get(f, f) for f in del_fields)
+        print(f'共扫描 {len(tracks)} 首，将检查 {len(targets)} 首曲目的待删除类别：[{lbls}]。')
+        if not targets:
+            print('没有可处理的曲目。')
+            return 0
+        s = execute_deletions(env, targets, del_opts, log_cb=print)
+        prefix = '[预演] 完成：预计修改' if args.dry_run else '完成：已修改'
+        fc_part = f"，目录cover.jpg {s['folder_cover_deleted']} 个" if s.get('folder_cover_deleted') else ''
+        print(f"{prefix} {s['deleted_ok']} 首{fc_part}，跳过 {s['deleted_skipped']} 首，失败 {s['deleted_fail'] + s['folder_cover_fail']} 项。")
+        return 0 if (s['deleted_fail'] + s['folder_cover_fail']) == 0 else 1
+
     env = detect_foobar_env()
     custom = [os.path.abspath(args.folder)] if args.folder else None
     print('foobar 目录:', env.fb_dir or '未检测到')
@@ -1244,11 +1829,17 @@ def main():
     parser.add_argument('--no-genre', action='store_true', help='跳过流派(genre)补全')
     parser.add_argument('--no-disc', action='store_true', help='跳过碟片编号(discnumber)补全')
     parser.add_argument('--no-sync', action='store_true', help='跳过 foobar 缓存刷新')
+    parser.add_argument(
+        '--delete', action='append', default=[], metavar='FIELDS',
+        help='删除指定元数据类别（逗号分隔或多次传入，如 --delete composer,performer）；可选: ' + ','.join(DELETABLE_FIELDS),
+    )
+    parser.add_argument('--delete-folder-cover', action='store_true', help='删除封面时同时删除同目录外置 cover.jpg')
+    parser.add_argument('--no-protect-163', action='store_true', help='删除注释时一并删除网易云 163 key（默认保留）')
     parser.add_argument('--folder', default='', help='指定扫描目录')
     parser.add_argument('--include-full-album', action='store_true', help='也尝试处理整轨全长文件')
     args = parser.parse_args()
 
-    if args.auto or args.dry_run or args.sync_only:
+    if args.auto or args.dry_run or args.sync_only or args.delete:
         sys.exit(run_cli(args))
 
     if os.name == 'nt':

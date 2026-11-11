@@ -18,7 +18,9 @@ from mutagen.mp3 import MP3
 from art_repair import (
     analyze_folder_art_and_tags,
     apply_folder_cover_file,
+    apply_track_deletions,
     apply_track_repairs,
+    inspect_deletable_fields,
     read_pictures,
 )
 from foobar_library import (
@@ -1530,6 +1532,276 @@ class TrackFixerTests(unittest.TestCase):
             with self.assertRaises(SystemExit) as cm:
                 app_mod.main()
         self.assertEqual(cm.exception.code, 0)
+
+    def test_delete_partial_metadata_flac_mp3_wav_and_163_protection(self):
+        from mutagen.id3 import COMM, ID3, TMCL, TXXX
+        from mutagen.wave import WAVE
+
+        sample_163 = (
+            "163 key(Don't modify):L64FU3W4YxX3ZFTmbZ+8/eam10XVQrPtLahYtNC7enAJ9mlpBgvX0sr9GKudLNFQ"
+            "VqcxU007NFWqDNgyHWMFmx/37KP97Ivn3ajP/wIGzSmzQKvvty3u0gg+28Au2RZXnwfUFj1HoVoD5tNzv43Fe"
+            "Rhba8rBx+opuKBKoylQgQ06mjmx9CF5o9WhjPHqM5amcFZH8uRY1bC5xQrntTzvfOb47xtQDR+8/DhYvOjZ6"
+            "GrVD4wgUjmx9Y+fcSSg7cMwu0uPzCfPrs5aYeyLvNjJZD4giJqztMUu+JHGWPVEOCGh27ppeYGQkUFY/yX7b"
+            "OxO7/fM4KP8rSr3NVHX1DJ7YpohwTuET67c398SW3CJzpZTVRs7XjCrjnkjH47dmPDDcTAl1NgcXX9zDWya"
+            "igNOisUzGCa4hBKK3ws64NUj2b1/RC5+6s5tboJINozD5ikBiV3SRqy4aHIQvEQ2I5JhdUW8xXqdYKhPvkDu"
+            "vlS8tuPEFz9cBUmprnw7+K1CiXQzCEzcNVM1G2krN+jUBL2XHmEyiQAyt9BMxC8OAdQJS3eEBRLUPr+wvmWt"
+            "0daegjPsfErLy61v+0SVDqyHokAJQbYX/rdcDato6fIaIrw9xAk="
+        )
+        cov = self._make_jpeg_bytes(200, 200, (90, 60, 150))
+
+        # 1) FLAC：保留 title/artist/album/date/genre/track/disc 与 DESCRIPTION 163 key，仅删除 composer/performer/comment/cover
+        flac_path = self._make_minimal_flac('del_partial.flac')
+        fl = FLAC(flac_path)
+        fl['TITLE'] = ['KeepTitle']
+        fl['ARTIST'] = ['KeepArtist']
+        fl['ALBUMARTIST'] = ['KeepAA']
+        fl['ALBUM'] = ['KeepAlbum']
+        fl['DATE'] = ['2021-05-01']
+        fl['DESCRIPTION'] = [sample_163]
+        fl.save()
+        ok_w, msg_w = apply_track_repairs(
+            flac_path,
+            tag_updates={'composer': 'DelComp', 'performer': 'DelPerf', 'genre': 'Rock', 'comment': 'DelComment'},
+            cover_bytes=cov, cover_mime='image/jpeg', tracknumber=6, discnumber=2,
+        )
+        self.assertTrue(ok_w, msg_w)
+
+        deleted: list[str] = []
+        ok_d, msg_d = apply_track_deletions(
+            flac_path, ['composer', 'performer', 'comment', 'cover'], protect_163_key=True, out_deleted=deleted,
+        )
+        self.assertTrue(ok_d, msg_d)
+        self.assertEqual(set(deleted), {'composer', 'performer', 'comment', 'cover'})
+        info_fl = read_audio_info(flac_path)
+        self.assertEqual(info_fl['title'], 'KeepTitle')
+        self.assertEqual(info_fl['artist'], 'KeepArtist')
+        self.assertEqual(info_fl['albumartist'], 'KeepAA')
+        self.assertEqual(info_fl['album'], 'KeepAlbum')
+        self.assertEqual(info_fl['date'], '2021-05-01')
+        self.assertEqual(info_fl['genre'], 'Rock')
+        self.assertEqual(info_fl['track_int'], 6)
+        self.assertEqual(info_fl['disc_int'], 2)
+        self.assertEqual(info_fl['composer'], '')
+        self.assertEqual(info_fl['performer'], '')
+        self.assertEqual(info_fl['comment'], '')
+        self.assertTrue(info_fl['has_163_key'])
+        self.assertEqual(read_pictures(FLAC(flac_path), 'flac'), [])
+
+        # 再次以 protect_163_key=True 尝试删除 comment，应跳过并保留 163 key
+        deleted2: list[str] = []
+        ok_d2, msg_d2 = apply_track_deletions(flac_path, ['comment'], protect_163_key=True, out_deleted=deleted2)
+        self.assertTrue(ok_d2)
+        self.assertEqual(deleted2, [])
+        self.assertIn('163 key', msg_d2)
+
+        # 关闭 163 key 保护后应连同 DESCRIPTION 中的 163 key 一并清除
+        deleted3: list[str] = []
+        ok_d3, msg_d3 = apply_track_deletions(flac_path, ['comment'], protect_163_key=False, out_deleted=deleted3)
+        self.assertTrue(ok_d3, msg_d3)
+        self.assertEqual(deleted3, ['comment'])
+        self.assertFalse(read_audio_info(flac_path)['has_163_key'])
+
+        # 2) MP3：同时包含 TXXX:PERFORMER、TMCL、无关 TXXX、双 COMM（163 key + 普通注释）和 APIC
+        mp3_path = self._make_minimal_mp3('del_partial.mp3')
+        ok_mw, msg_mw = apply_track_repairs(
+            mp3_path,
+            tag_updates={'title': 'Mp3Title', 'artist': 'Mp3Art', 'album': 'Mp3Alb', 'composer': 'Mp3Comp', 'genre': 'Jazz', 'date': '2022-03-04'},
+            cover_bytes=cov, cover_mime='image/jpeg', tracknumber=3, discnumber=2,
+        )
+        self.assertTrue(ok_mw, msg_mw)
+        id3 = ID3(mp3_path)
+        id3.add(TXXX(encoding=3, desc='PERFORMER', text=['Singer A']))
+        id3.add(TXXX(encoding=3, desc='REPLAYGAIN_TRACK_GAIN', text=['-4.5 dB']))
+        id3.add(TMCL(encoding=3, people=[['guitar', 'Player B']]))
+        id3.add(COMM(encoding=3, lang='eng', desc='', text=[sample_163]))
+        id3.add(COMM(encoding=3, lang='eng', desc='extra', text=['Junk Note']))
+        id3.save(mp3_path, v2_version=3)
+
+        mp3_deleted: list[str] = []
+        ok_md, msg_md = apply_track_deletions(
+            mp3_path, ['performer', 'comment', 'cover', 'discnumber'], protect_163_key=True, out_deleted=mp3_deleted,
+        )
+        self.assertTrue(ok_md, msg_md)
+        self.assertEqual(set(mp3_deleted), {'performer', 'comment', 'cover', 'discnumber'})
+        info_mp3 = read_audio_info(mp3_path)
+        self.assertEqual(info_mp3['title'], 'Mp3Title')
+        self.assertEqual(info_mp3['composer'], 'Mp3Comp')
+        self.assertEqual(info_mp3['track_int'], 3)
+        self.assertEqual(info_mp3['performer'], '')
+        self.assertIsNone(info_mp3['disc_int'])
+        self.assertTrue(info_mp3['has_163_key'])
+        self.assertNotIn('Junk Note', info_mp3['raw_comment'])
+        self.assertEqual(read_pictures(MP3(mp3_path), 'mp3'), [])
+        id3_after = MP3(mp3_path).tags
+        rg = [f for f in id3_after.getall('TXXX') if f.desc == 'REPLAYGAIN_TRACK_GAIN']
+        self.assertEqual(len(rg), 1)
+        self.assertEqual(leftover := [f for f in os.listdir(self.tmp) if f.endswith('.musictmp')], [])
+
+        # 3) WAV：删除 date 与 tracknumber，保留 title
+        wav_path = self._make_minimal_wav('del_partial.wav')
+        ok_ww, msg_ww = apply_track_repairs(wav_path, tag_updates={'title': 'WavKeep', 'date': '2020-01-01'}, tracknumber=8)
+        self.assertTrue(ok_ww, msg_ww)
+        wav_del: list[str] = []
+        ok_wd, msg_wd = apply_track_deletions(wav_path, ['date', 'tracknumber'], out_deleted=wav_del)
+        self.assertTrue(ok_wd, msg_wd)
+        self.assertEqual(set(wav_del), {'date', 'tracknumber'})
+        info_wav = read_audio_info(wav_path)
+        self.assertEqual(info_wav['title'], 'WavKeep')
+        self.assertEqual(info_wav['date'], '')
+        self.assertIsNone(info_wav['track_int'])
+        self.assertEqual(WAVE(wav_path).tags.getall('TRCK'), [])
+
+    def test_execute_deletions_folder_cover_dry_run_and_cli(self):
+        import contextlib
+        import app as app_mod
+
+        sub = os.path.join(self.tmp, 'DelBatch')
+        os.makedirs(sub, exist_ok=True)
+        cov = self._make_jpeg_bytes(220, 220, (30, 140, 200))
+        cov_file = os.path.join(sub, 'cover.jpg')
+        with open(cov_file, 'wb') as out:
+            out.write(cov)
+
+        fp1 = self._make_minimal_flac(os.path.join(sub, '01.flac'))
+        fp2 = self._make_minimal_flac(os.path.join(sub, '02.flac'))
+        for idx, fp in enumerate((fp1, fp2), 1):
+            apply_track_repairs(
+                fp,
+                tag_updates={'title': f'T{idx}', 'artist': 'Art', 'album': 'Alb', 'date': '2024-01-01', 'composer': f'Comp{idx}'},
+                cover_bytes=cov, cover_mime='image/jpeg', tracknumber=idx,
+            )
+
+        env = FoobarEnv(library_folders=[sub])
+        tracks = scan_library(env)
+
+        # 1) 预演模式不修改文件和目录 cover.jpg
+        dry_opts = app_mod.DeleteOptions(
+            fields=frozenset({'composer', 'cover'}),
+            delete_folder_cover=True,
+            enable_sync=False,
+            dry_run=True,
+        )
+        s_dry = app_mod.execute_deletions(env, tracks, dry_opts)
+        self.assertEqual(s_dry['deleted_ok'], 2)
+        self.assertEqual(s_dry['folder_cover_deleted'], 1)
+        self.assertTrue(os.path.isfile(cov_file))
+        self.assertEqual(read_audio_info(fp1)['composer'], 'Comp1')
+        self.assertEqual(len(read_pictures(FLAC(fp1), 'flac')), 1)
+
+        # 2) CLI 支持中文类别名与英文类别名混用，以及 --delete-folder-cover
+        buf = io.StringIO()
+        with patch('sys.argv', [
+            'app.py', '--delete', '作曲,cover', '--delete-folder-cover', '--no-sync', '--folder', sub,
+        ]), contextlib.redirect_stdout(buf):
+            with self.assertRaises(SystemExit) as cm:
+                app_mod.main()
+        self.assertEqual(cm.exception.code, 0)
+        self.assertFalse(os.path.exists(cov_file))
+        for fp in (fp1, fp2):
+            info = read_audio_info(fp)
+            self.assertEqual(info['composer'], '')
+            self.assertEqual(info['artist'], 'Art')
+            self.assertEqual(info['date'], '2024-01-01')
+            self.assertEqual(read_pictures(FLAC(fp), 'flac'), [])
+
+        # 3) CLI 传入无效类别应返回退出码 2
+        err_buf = io.StringIO()
+        with patch('sys.argv', ['app.py', '--delete', 'invalid_tag', '--folder', sub]), contextlib.redirect_stderr(err_buf):
+            with self.assertRaises(SystemExit) as cm_err:
+                app_mod.main()
+        self.assertEqual(cm_err.exception.code, 2)
+
+    def test_gui_delete_partial_metadata_dialog_and_refresh(self):
+        import time
+        import tkinter as tk
+        import app as app_mod
+
+        sub = os.path.join(self.tmp, 'GuiDel')
+        os.makedirs(sub, exist_ok=True)
+        cov = self._make_jpeg_bytes(200, 200, (120, 90, 40))
+        with open(os.path.join(sub, 'cover.jpg'), 'wb') as out:
+            out.write(cov)
+        fp1 = self._make_minimal_flac(os.path.join(sub, '01.flac'))
+        fp2 = self._make_minimal_flac(os.path.join(sub, '02.flac'))
+        for idx, fp in enumerate((fp1, fp2), 1):
+            apply_track_repairs(
+                fp,
+                tag_updates={
+                    'title': f'Song{idx}', 'artist': 'Art', 'albumartist': 'Art', 'album': 'Alb',
+                    'date': '2023-01-02', 'composer': f'Comp{idx}', 'performer': f'Perf{idx}', 'genre': 'Pop',
+                },
+                cover_bytes=cov, cover_mime='image/jpeg', tracknumber=idx, discnumber=1,
+            )
+
+        env = FoobarEnv(library_folders=[sub])
+        scanned = scan_library(env)
+
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            with patch('app.messagebox.showinfo') as m_info, \
+                 patch('app.messagebox.askyesno', return_value=True) as m_ask, \
+                 patch('app.sync_files_to_foobar', return_value=(0, False)):
+                win = app_mod.MainWindow(root, auto_scan=False)
+                win._on_scan_finished(env, scanned)
+                self.assertEqual(win.visible_tracks, [])
+
+                # 未勾选曲目时点击删除应提示
+                win.btn_delete_meta.invoke()
+                self.assertEqual(m_info.call_count, 1)
+
+                # 显示全部曲目并仅勾选第一首
+                win.var_only_pending.set(False)
+                win._refresh_table()
+                self.assertEqual(len(win.visible_tracks), 2)
+                win._toggle_row(fp1)
+
+                def _drive_dialog():
+                    dlg = getattr(win, '_last_delete_dialog', None)
+                    if dlg is None or not dlg.top.winfo_exists():
+                        root.after(15, _drive_dialog)
+                        return
+                    # 验证全选/全不选及封面联动开关状态
+                    dlg.btn_select_all.invoke()
+                    self.assertEqual(str(dlg.chk_delete_folder_cover.cget('state')), 'normal')
+                    dlg.btn_select_none.invoke()
+                    self.assertEqual(str(dlg.chk_delete_folder_cover.cget('state')), 'disabled')
+                    dlg.field_vars['composer'].set(True)
+                    dlg.field_vars['genre'].set(True)
+                    dlg.var_sync.set(False)
+                    dlg.btn_confirm.invoke()
+
+                root.after(20, _drive_dialog)
+                win.btn_delete_meta.invoke()
+
+                deadline = time.monotonic() + 5.0
+                while win._busy and time.monotonic() < deadline:
+                    root.update()
+                    time.sleep(0.02)
+                root.update()
+
+                m_ask.assert_called_once()
+                self.assertFalse(win._busy)
+
+            info1 = read_audio_info(fp1)
+            info2 = read_audio_info(fp2)
+            self.assertEqual(info1['composer'], '')
+            self.assertEqual(info1['genre'], '')
+            self.assertEqual(info1['title'], 'Song1')
+            self.assertEqual(info1['date'], '2023-01-02')
+            self.assertEqual(info2['composer'], 'Comp2')
+            self.assertEqual(info2['genre'], 'Pop')
+
+            tr1 = next(t for t in win.tracks if t.path == fp1)
+            self.assertEqual(tr1.composer, '')
+            self.assertEqual(tr1.genre, '')
+            self.assertIn('composer', tr1.missing_extra_fields)
+            self.assertEqual(tr1.tag_updates.get('genre'), 'Pop')
+            self.assertTrue(tr1.needs_foobar_sync)
+            self.assertNotIn(fp1, win.checked_paths)
+            self.assertEqual(win.tree.item(fp1, 'values')[1], '已删除')
+        finally:
+            root.destroy()
 
 
 if __name__ == '__main__':
