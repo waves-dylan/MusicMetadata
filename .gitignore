@@ -1,0 +1,29 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# PyInstaller build artifacts (keep packaged SongMetadata.exe as requested)
+build/
+*.manifest
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Test / tool caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+
+# Runtime temporary / backup files
+*.musictmp
+*.bak
+
+# Editor / OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
