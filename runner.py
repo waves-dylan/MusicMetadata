@@ -35,8 +35,10 @@ from track_lookup import (
     TrackMatch,
     clear_caches,
     fetch_cover_bytes,
+    get_spotify_credentials,
     resolve_track_metadata,
     set_netease_api_base,
+    set_spotify_credentials,
 )
 
 FOLDER_COVER_LABELS = {
@@ -81,6 +83,8 @@ class FixOptions:
     only_sources: tuple[str, ...] = ()
     skip_sources: tuple[str, ...] = ()
     netease_api: str | None = None
+    spotify_client_id: str | None = None
+    spotify_client_secret: str | None = None
     enable_sync: bool = True
     sync_only: bool = False
     dry_run: bool = False
@@ -381,6 +385,12 @@ def execute_repairs(
     """统一执行元数据检查刷新、封面修复、标签补全、歌词抓取与音轨号补全（GUI 与 CLI 共用）。"""
     if options.netease_api is not None:
         set_netease_api_base(options.netease_api)
+    if options.spotify_client_id is not None or options.spotify_client_secret is not None:
+        cur_sp_id, cur_sp_sec = get_spotify_credentials()
+        set_spotify_credentials(
+            cur_sp_id if options.spotify_client_id is None else options.spotify_client_id,
+            cur_sp_sec if options.spotify_client_secret is None else options.spotify_client_secret,
+        )
     clear_caches()
     total, cancelled = len(targets), False
     emit_log = log_cb or (lambda _m: None)

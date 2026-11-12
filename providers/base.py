@@ -108,6 +108,45 @@ def cached_call(cache: dict, inflight: dict, key: tuple, fn):
             ev.set()
 
 
+_CIRCUIT_BREAKERS: list['ProviderCircuitBreaker'] = []
+
+
+class ProviderCircuitBreaker:
+    """线程安全的连续失败熔断器，避免不可达外部服务拖慢批量查询。"""
+
+    def __init__(self, threshold: int = 5):
+        self.threshold = threshold
+        self._lock = threading.Lock()
+        self._consec_fails = 0
+        self._open = False
+        _CIRCUIT_BREAKERS.append(self)
+
+    def is_open(self) -> bool:
+        with self._lock:
+            return self._open
+
+    def record_success(self) -> None:
+        with self._lock:
+            self._consec_fails = 0
+
+    def record_failure(self) -> bool:
+        with self._lock:
+            self._consec_fails += 1
+            if self._consec_fails >= self.threshold:
+                self._open = True
+            return self._open
+
+    def reset(self) -> None:
+        with self._lock:
+            self._consec_fails = 0
+            self._open = False
+
+
+def reset_all_circuit_breakers() -> None:
+    for cb in _CIRCUIT_BREAKERS:
+        cb.reset()
+
+
 def http_get_text(url: str, params=None, headers=None, timeout: int = 8) -> str | None:
     try:
         full_url = f"{url}?{urllib.parse.urlencode(params)}" if params else url
@@ -137,6 +176,19 @@ def http_post_json(url: str, payload: dict, headers=None, timeout: int = 8):
         if headers:
             hdrs.update(headers)
         req = urllib.request.Request(url, data=json.dumps(payload).encode('utf-8'), headers=hdrs)
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode('utf-8', errors='replace'))
+    except Exception:
+        return None
+
+
+def http_post_form(url: str, form: dict[str, str], headers=None, timeout: int = 8):
+    try:
+        hdrs = {'User-Agent': USER_AGENT, 'Content-Type': 'application/x-www-form-urlencoded'}
+        if headers:
+            hdrs.update(headers)
+        body = urllib.parse.urlencode(form).encode('utf-8')
+        req = urllib.request.Request(url, data=body, headers=hdrs)
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return json.loads(resp.read().decode('utf-8', errors='replace'))
     except Exception:
@@ -496,13 +548,13 @@ __all__ = [
     'ALBUM_CACHE', 'ALBUM_META_CACHE', 'CACHE_LOCK', 'COVER_CACHE',
     'INFLIGHT_ALBUM', 'INFLIGHT_SEARCH', 'INFLIGHT_SONG_SEARCH',
     'KUGOU_INFO_DONE', 'PKL_CACHE', 'SEARCH_CACHE', 'SONG_META_CACHE', 'SONG_SEARCH_CACHE',
-    'MusicProvider', 'TrackMatch', 'USER_AGENT',
+    'MusicProvider', 'ProviderCircuitBreaker', 'TrackMatch', 'USER_AGENT',
     'build_tracks', 'bump_cache_gen', 'cached_album', 'cached_call',
     'cached_search', 'cached_song_meta', 'cached_song_search', 'choose_album_detail',
     'extract_artist_names', 'first_artist', 'get_album_date', 'get_album_meta', 'get_cache_gen',
-    'http_get_json', 'http_get_text', 'http_post_json',
+    'http_get_json', 'http_get_text', 'http_post_form', 'http_post_json',
     'is_artist_compatible', 'match_in_tracks', 'merge_lyrics',
     'norm_core', 'norm_full', 'norm_id', 'normalize_release_date',
-    'parse_lyric_credits', 'set_album_date', 'set_album_meta',
+    'parse_lyric_credits', 'reset_all_circuit_breakers', 'set_album_date', 'set_album_meta',
     'song_matches', 'time', 'to_seconds',
 ]

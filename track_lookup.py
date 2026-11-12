@@ -17,13 +17,19 @@ from providers import (
     PROVIDERS,
     PROVIDER_LABELS,
     TrackMatch,
+    deezer_provider,
     get_netease_api_base,
+    get_spotify_credentials,
+    has_spotify_credentials,
     kugou_provider,
+    lrclib_provider,
     netease_provider,
     parse_source_list,
     qq_provider,
     resolve_provider_order,
     set_netease_api_base,
+    set_spotify_credentials,
+    ytmusic_provider,
 )
 from providers.base import (
     CACHE_LOCK,
@@ -39,6 +45,7 @@ from providers.base import (
     norm_core,
     normalize_release_date,
     parse_lyric_credits,
+    reset_all_circuit_breakers,
     song_matches,
     to_seconds,
 )
@@ -47,11 +54,13 @@ from tag_io import parse_filename_clues
 
 _QQ_MID_RE = re.compile(r'^[0-9A-Za-z]{14}$')
 _NETEASE_ID_RE = re.compile(r'^\d{5,15}$')
+_SPOTIFY_ID_RE = re.compile(r'^[0-9A-Za-z]{22}$')
 
 
 def clear_caches() -> None:
     bump_cache_gen()
     reset_mb_circuit()
+    reset_all_circuit_breakers()
 
 
 def fetch_cover_bytes(cover_url: str, timeout: int = 15) -> bytes | None:
@@ -246,6 +255,10 @@ _SOURCE_TAG_PREFIXES: tuple[tuple[str, str], ...] = (
     ('kugou', '酷狗'),
     ('migu', '咪咕'),
     ('baidu', '千千'),
+    ('deezer', 'Deezer'),
+    ('ytmusic', 'YouTube Music'),
+    ('lrclib', 'LRCLIB'),
+    ('spotify', 'Spotify'),
 )
 
 
@@ -312,8 +325,8 @@ def _enrich_song_credits(
         ex = netease_provider.get_song_extra(song_id)
     elif plat == 'qq' and (need_comp or need_genre or need_lrc) and song_id:
         ex = qq_provider.get_song_extra(song_id)
-    elif plat == 'kugou' and (need_comp or need_lrc) and song_id:
-        ex = kugou_provider.get_song_extra(song_id, need_lyrics=need_lrc, title=title or match.title, duration=duration)
+    elif plat in ('kugou', 'ytmusic', 'lrclib') and (need_comp or need_lrc) and song_id:
+        ex = PROVIDERS[plat].get_song_extra(song_id, need_lyrics=need_lrc, title=title or match.title, duration=duration)
     elif plat in ('migu', 'baidu') and (need_comp or need_lrc) and lrc_url:
         ex = PROVIDERS[plat].get_lyrics_by_url(song_id, lrc_url)
 
@@ -359,8 +372,8 @@ def _search_song_and_resolve_album(
             sid, aid, alb_name = hit['song_id'], hit['album_id'], hit['album_name']
             pub_date, cov = hit['release_date'], hit['cover_url']
 
-            if plat in ('netease', 'qq', 'itunes'):
-                cov_kw = {'cover_url': cov} if plat == 'netease' and cov else {}
+            if plat in ('netease', 'qq', 'itunes', 'deezer', 'ytmusic', 'spotify'):
+                cov_kw = {'cover_url': cov} if cov and plat in ('netease', 'deezer', 'ytmusic', 'spotify') else {}
                 if aid:
                     if aid not in seen_albs and len(seen_albs) >= 3:
                         continue
@@ -371,12 +384,12 @@ def _search_song_and_resolve_album(
                     if m and (need_track or not need_date or rdate):
                         cand = _make_match(plat, aid, m, len(tracks), f'{label}(单曲反查)', alb_name, release_date=rdate, **cov_kw)
                         return _enrich_song_credits(cand, plat, str(m.get('id') or sid), dummy, need_extra=need_extra, need_lyrics=need_lyrics)
-                    can_fb = rdate or (plat == 'netease' and (cov or need_lyrics)) or (plat == 'qq' and need_lyrics)
+                    can_fb = rdate or (plat == 'netease' and (cov or need_lyrics)) or (plat == 'qq' and need_lyrics) or (plat in ('deezer', 'ytmusic', 'spotify') and (cov or need_lyrics))
                     if not need_track and can_fb and date_fallback is None:
                         cand = _make_match(plat, aid, None, None, f'{label}(单曲反查)', alb_name, release_date=rdate, artist=sart, title=stitle, **cov_kw)
                         date_fallback = _enrich_song_credits(cand, plat, sid, dummy, need_extra=need_extra, need_lyrics=need_lyrics)
-                elif not need_track and (pub_date or (plat in ('netease', 'qq') and need_lyrics)) and date_fallback is None:
-                    extra_kw = {'genre': hit['genre'], 'cover_url': cov} if plat == 'itunes' else {}
+                elif not need_track and (pub_date or (plat in ('netease', 'qq', 'ytmusic') and need_lyrics) or (plat in ('deezer', 'spotify') and cov)) and date_fallback is None:
+                    extra_kw = {'genre': hit['genre'], 'cover_url': cov} if plat == 'itunes' else ({'cover_url': cov} if cov else {})
                     cand = TrackMatch(None, source=f'{label}(单曲反查)', album_name=alb_name, release_date=pub_date, artist=sart, title=stitle, **extra_kw)
                     date_fallback = _enrich_song_credits(cand, plat, sid, dummy, need_extra=need_extra, need_lyrics=need_lyrics)
             else:
@@ -390,6 +403,8 @@ def _search_song_and_resolve_album(
                 rdate = get_album_date('kugou', aid) if (plat == 'kugou' and aid) else ''
                 cand = TrackMatch(None, source=f'{label}(单曲搜索)', album_name=alb_name, release_date=rdate, title=stitle, artist=sart, cover_url=cov)
                 _enrich_song_credits(cand, plat, sid, dummy, need_extra=need_extra, need_lyrics=need_lyrics, title=stitle, duration=sdur, lrc_url=hit['lrc_url'])
+                if plat == 'lrclib' and need_lyrics and not cand.lyrics:
+                    continue
                 if not need_track:
                     return cand
                 if date_fallback is None:
@@ -436,6 +451,14 @@ def _resolve_by_song_id(
         song_art = extract_artist_names(det.get('singer'))
         song_title = str(det.get('title') or det.get('name') or '')
         cover_url, fallback_tn = '', det.get('index_album')
+    elif plat == 'spotify':
+        aid = str(alb.get('id') or '')
+        song_date = normalize_release_date(alb.get('release_date'))
+        song_art = extract_artist_names(det.get('artists'))
+        song_title = str(det.get('name') or '')
+        imgs = alb.get('images') or []
+        cover_url = str((imgs[0] if imgs and isinstance(imgs[0], dict) else {}).get('url') or '')
+        fallback_tn = det.get('track_number')
     else:
         aid = str(alb.get('id') or '')
         song_date = normalize_release_date(alb.get('publishTime') or det.get('publishTime'), is_ms=True)
@@ -559,7 +582,11 @@ def _resolve_metadata_core(
             return cand
 
     # 3. 文件名自带歌曲 ID 直查
-    id_plat = 'qq' if (ident and _QQ_MID_RE.match(ident)) else ('netease' if (ident and _NETEASE_ID_RE.match(ident)) else '')
+    id_plat = (
+        'qq' if (ident and _QQ_MID_RE.match(ident))
+        else ('netease' if (ident and _NETEASE_ID_RE.match(ident))
+              else ('spotify' if (ident and has_spotify_credentials() and _SPOTIFY_ID_RE.match(ident)) else ''))
+    )
     if id_plat and id_plat not in skip_plats:
         id_cand = _resolve_by_song_id(
             id_plat, ident, track, title, album, duration,
@@ -574,13 +601,12 @@ def _resolve_metadata_core(
     album_fallback: TrackMatch | None = None
     if album:
         terms = [f'{album} {artist}'.strip(), album] if artist else [album]
-        album_plats = ('netease', 'qq', 'itunes', 'mb')
         for plat in order:
-            if plat in skip_plats or plat not in album_plats:
+            prov = PROVIDERS.get(plat)
+            if plat in skip_plats or not prov or not prov.supports_album_search:
                 continue
             if plat == 'mb' and not allow_mb:
                 continue
-            prov = PROVIDERS[plat]
             label = prov.label
             query_terms = [album] if plat == 'mb' else terms
             for term in query_terms:

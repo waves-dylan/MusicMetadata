@@ -179,6 +179,8 @@ def run_cli(args) -> int:
         enable_lyrics=enable_lyrics, lyrics_mode=lyrics_mode,
         prefer_sources=prefer_sources, only_sources=only_sources, skip_sources=skip_sources,
         netease_api=(getattr(args, 'netease_api', '') or '').strip() or None,
+        spotify_client_id=(getattr(args, 'spotify_client_id', None) or None),
+        spotify_client_secret=(getattr(args, 'spotify_client_secret', None) or None),
         enable_sync=not args.no_sync, sync_only=args.sync_only, dry_run=args.dry_run,
     )
     if opts.enable_tags and not any((opts.enable_date, opts.enable_albumartist, opts.enable_artist, opts.enable_composer, opts.enable_genre, opts.enable_disc)):
@@ -233,6 +235,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument('--source', '--provider', dest='source', default='', help='仅使用指定在线数据源，逗号分隔')
     parser.add_argument('--skip-source', default='', help='跳过的在线数据源，逗号分隔')
     parser.add_argument('--netease-api', default='', help='自定义网易云音乐 API 地址（留空使用官方接口）')
+    parser.add_argument('--spotify-client-id', default='', help='可选 Spotify Web API Client ID（也可通过环境变量 SPOTIFY_CLIENT_ID 设置）')
+    parser.add_argument('--spotify-client-secret', default='', help='可选 Spotify Web API Client Secret（也可通过环境变量 SPOTIFY_CLIENT_SECRET 设置）')
     parser.add_argument('--no-sync', action='store_true', help='跳过 foobar 缓存刷新')
     parser.add_argument(
         '--set', dest='set_tags', action='append', default=[], metavar='KEY=VALUE',

@@ -72,9 +72,11 @@ from track_lookup import (
     clear_caches,
     fetch_cover_bytes,
     get_netease_api_base,
+    get_spotify_credentials,
     parse_source_list,
     resolve_track_metadata,
     set_netease_api_base,
+    set_spotify_credentials,
 )
 
 
@@ -176,7 +178,11 @@ class MainWindow:
         '默认': (),
         '网易云优先': ('netease',),
         'QQ音乐优先': ('qq',),
-        'Apple/MB优先': ('itunes', 'mb'),
+        'Apple/iTunes优先': ('itunes',),
+        'MusicBrainz优先': ('mb',),
+        '欧美/国际优先': ('itunes', 'deezer', 'ytmusic', 'lrclib', 'mb', 'spotify'),
+        'YouTube Music优先': ('ytmusic', 'lrclib'),
+        'Deezer优先': ('deezer', 'lrclib'),
         '酷狗优先': ('kugou',),
         '咪咕优先': ('migu',),
         '千千优先': ('baidu',),
@@ -217,6 +223,7 @@ class MainWindow:
         self._only_sources: tuple[str, ...] = ()
         self._skip_sources: tuple[str, ...] = ()
         self._netease_api: str = ''
+        self._spotify_client_id, self._spotify_client_secret = get_spotify_credentials()
         self.var_only_pending = tk.BooleanVar(value=True)
         self.var_skip_full = tk.BooleanVar(value=True)
         self.var_env = tk.StringVar(value='未自动扫描媒体库；请点击下方「扫描媒体库」或右上角「选择目录...」开始扫描。')
@@ -337,8 +344,8 @@ class MainWindow:
         ttk.Label(opts_misc, text='音源:').pack(side='left')
         self.cmb_prefer_source = ttk.Combobox(
             opts_misc, textvariable=self.var_prefer_preset,
-            values=['默认', '网易云优先', 'QQ音乐优先', 'Apple/MB优先', '酷狗优先', '咪咕优先', '千千优先', '自定义'],
-            state='readonly', width=11,
+            values=list(self._PREFER_PRESETS.keys()) + ['自定义'],
+            state='readonly', width=16,
         )
         self.cmb_prefer_source.pack(side='left', padx=(4, 4))
         self.btn_source_cfg = ttk.Button(opts_misc, text='数据源...', command=self._on_source_config)
@@ -421,6 +428,8 @@ class MainWindow:
             only_sources=self._only_sources,
             skip_sources=self._skip_sources,
             netease_api=self._netease_api or None,
+            spotify_client_id=self._spotify_client_id or None,
+            spotify_client_secret=self._spotify_client_secret or None,
             enable_sync=self.var_sync.get(),
             sync_only=sync_only,
         )
@@ -783,6 +792,8 @@ class MainWindow:
             only_sources=self._only_sources,
             skip_sources=self._skip_sources,
             netease_api=self._netease_api,
+            spotify_client_id=self._spotify_client_id,
+            spotify_client_secret=self._spotify_client_secret,
         )
         self._last_source_dialog = dlg
         self.root.wait_window(dlg.top)
@@ -792,13 +803,18 @@ class MainWindow:
         self._only_sources = dlg.result['only_sources']
         self._skip_sources = dlg.result['skip_sources']
         self._netease_api = dlg.result['netease_api']
+        self._spotify_client_id = dlg.result['spotify_client_id']
+        self._spotify_client_secret = dlg.result['spotify_client_secret']
         set_netease_api_base(self._netease_api)
+        set_spotify_credentials(self._spotify_client_id, self._spotify_client_secret)
         self.var_prefer_preset.set('自定义' if (self._custom_prefer_sources or self._only_sources or self._skip_sources) else '默认')
+        sp_state = '已配置' if (self._spotify_client_id and self._spotify_client_secret) else '未配置(仅缓存)'
         self._log(
             f"已更新数据源配置：优先={','.join(self._custom_prefer_sources) or '默认'} | "
             f"仅用={','.join(self._only_sources) or '不限'} | "
             f"跳过={','.join(self._skip_sources) or '无'} | "
-            f"网易云API={self._netease_api or '官方直连'}"
+            f"网易云API={self._netease_api or '官方直连'} | "
+            f"Spotify API={sp_state}"
         )
 
     def _on_fix_row_updated(self, path: str, payload: dict):

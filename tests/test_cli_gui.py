@@ -73,6 +73,12 @@ class CliGuiTests(TempTrackTestCase):
                 m_scan.assert_not_called()
                 self.assertFalse(win._has_scanned)
                 self.assertEqual(str(win.btn_rescan.cget('text')), '扫描媒体库')
+                prefer_values = list(win.cmb_prefer_source.cget('values'))
+                self.assertNotIn('Apple/MB优先', prefer_values)
+                self.assertIn('Apple/iTunes优先', prefer_values)
+                self.assertIn('MusicBrainz优先', prefer_values)
+                self.assertEqual(win._PREFER_PRESETS['Apple/iTunes优先'], ('itunes',))
+                self.assertEqual(win._PREFER_PRESETS['MusicBrainz优先'], ('mb',))
 
                 # 尚未扫描时点击修复或同步应提示先扫描
                 win.btn_one_click.invoke()

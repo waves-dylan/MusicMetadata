@@ -15,19 +15,27 @@ from unittest.mock import patch
 from PIL import Image
 
 from app import SourceConfigDialog
+from cli import build_arg_parser
 from foobar_library import STATUS_OK, LibraryTrack
 from providers import (
     TrackMatch,
     baidu_provider,
+    deezer_provider,
     get_netease_api_base,
+    get_spotify_credentials,
+    has_spotify_credentials,
     itunes_provider,
     kugou_provider,
+    lrclib_provider,
     mb_provider,
     netease_provider,
     parse_source_list,
     qq_provider,
     resolve_provider_order,
     set_netease_api_base,
+    set_spotify_credentials,
+    spotify_provider,
+    ytmusic_provider,
 )
 from providers.baidu import _QIANQIAN_SECRET, sign_qianqian_params
 from providers.base import (
@@ -646,4 +654,329 @@ class ProvidersLookupTests(TempTrackTestCase):
                         dlg = None
         finally:
             set_netease_api_base('')
+            clear_caches()
+
+    def test_intl_providers_ytmusic_deezer_lrclib_and_spotify_api(self):
+        seen_requests: list[tuple[str, str]] = []
+
+        def _fake_resp(body):
+            return FakeHTTPResponse(body if isinstance(body, str) else json.dumps(body))
+
+        def _fake_urlopen(req, timeout=15):
+            url = req.full_url if hasattr(req, 'full_url') else str(req)
+            body = req.data.decode('utf-8', errors='replace') if getattr(req, 'data', None) else ''
+            seen_requests.append((url, body))
+
+            # Deezer
+            if 'api.deezer.com/search/album' in url:
+                return _fake_resp({
+                    'data': [{
+                        'id': 302127,
+                        'title': 'Discovery',
+                        'artist': {'name': 'Daft Punk'},
+                        'cover_xl': 'https://dz.test/discovery_xl.jpg',
+                    }],
+                })
+            if 'api.deezer.com/album/302127' in url:
+                return _fake_resp({
+                    'id': 302127,
+                    'title': 'Discovery',
+                    'release_date': '2001-03-12',
+                    'artist': {'name': 'Daft Punk'},
+                    'genres': {'data': [{'name': 'Electronic'}]},
+                    'cover_xl': 'https://dz.test/discovery_xl.jpg',
+                    'nb_tracks': 2,
+                    'tracks': {
+                        'data': [
+                            {'id': 3135553, 'title': 'One More Time', 'duration': 320, 'disk_number': 1, 'track_position': 1, 'artist': {'name': 'Daft Punk'}},
+                            {'id': 3135554, 'title': 'Aerodynamic', 'duration': 207, 'disk_number': 1, 'track_position': 2, 'artist': {'name': 'Daft Punk'}},
+                        ],
+                    },
+                })
+            if 'api.deezer.com/search/track' in url:
+                return _fake_resp({
+                    'data': [{
+                        'id': 3135553,
+                        'title': 'One More Time',
+                        'duration': 320,
+                        'artist': {'name': 'Daft Punk'},
+                        'album': {'id': 302127, 'title': 'Discovery', 'cover_xl': 'https://dz.test/discovery_xl.jpg'},
+                    }],
+                })
+
+            # LRCLIB (1 首纯音乐 + 1 首纯文本 + 1 首同步 LRC，应优先同步 LRC)
+            if 'lrclib.net/api/search' in url:
+                return _fake_resp([
+                    {'id': 1, 'trackName': 'One More Time', 'artistName': 'Daft Punk', 'albumName': 'Discovery', 'duration': 320, 'instrumental': True, 'plainLyrics': '', 'syncedLyrics': ''},
+                    {'id': 2, 'trackName': 'One More Time', 'artistName': 'Daft Punk', 'albumName': 'Discovery', 'duration': 320, 'plainLyrics': 'Plain text only', 'syncedLyrics': ''},
+                    {'id': 3, 'trackName': 'One More Time', 'artistName': 'Daft Punk', 'albumName': 'Discovery', 'duration': 320, 'plainLyrics': 'Plain', 'syncedLyrics': '[00:15.00]One more time'},
+                ])
+            if 'lrclib.net/api/get/' in url:
+                raise AssertionError('LRCLIB 命中 search 后应直接复用缓存，不应二次请求 /api/get')
+
+            # YouTube Music InnerTube
+            if 'music.youtube.com/youtubei/v1/search' in url:
+                payload = json.loads(body)
+                if payload.get('params') == 'EgWKAQIYAWoKEAMQBBAJEAoQBQ%3D%3D':
+                    return _fake_resp({
+                        'contents': {'tabbedSearchResultsRenderer': {'tabs': [{'tabRenderer': {'content': {'sectionListRenderer': {'contents': [
+                            {'musicShelfRenderer': {'contents': [
+                                {'musicResponsiveListItemRenderer': {
+                                    'navigationEndpoint': {'browseEndpoint': {'browseId': 'MPREb_YTM_ALB1'}},
+                                    'thumbnail': {'musicThumbnailRenderer': {'thumbnail': {'thumbnails': [{'url': 'https://lh3.googleusercontent.com/abc=w120-h120-l90-rj'}]}}},
+                                    'flexColumns': [
+                                        {'musicResponsiveListItemFlexColumnRenderer': {'text': {'runs': [{'text': 'Random Access Memories'}]}}},
+                                        {'musicResponsiveListItemFlexColumnRenderer': {'text': {'runs': [
+                                            {'text': 'Album'}, {'text': ' • '},
+                                            {'text': 'Daft Punk', 'navigationEndpoint': {'browseEndpoint': {'browseId': 'UC_DAFT'}}},
+                                            {'text': ' • '}, {'text': '2013'},
+                                        ]}}},
+                                    ],
+                                }},
+                            ]}},
+                        ]}}}}]}},
+                    })
+                return _fake_resp({
+                    'contents': {'tabbedSearchResultsRenderer': {'tabs': [{'tabRenderer': {'content': {'sectionListRenderer': {'contents': [
+                        {'musicShelfRenderer': {'contents': [
+                            {'musicResponsiveListItemRenderer': {
+                                'playlistItemData': {'videoId': 'ytm_vid_1'},
+                                'thumbnail': {'musicThumbnailRenderer': {'thumbnail': {'thumbnails': [{'url': 'https://lh3.googleusercontent.com/song=w120-h120-l90-rj'}]}}},
+                                'flexColumns': [
+                                    {'musicResponsiveListItemFlexColumnRenderer': {'text': {'runs': [{'text': 'Get Lucky'}]}}},
+                                    {'musicResponsiveListItemFlexColumnRenderer': {'text': {'runs': [
+                                        {'text': 'Daft Punk', 'navigationEndpoint': {'browseEndpoint': {'browseId': 'UC_DAFT'}}},
+                                        {'text': ' • '},
+                                        {'text': 'Random Access Memories', 'navigationEndpoint': {'browseEndpoint': {'browseId': 'MPREb_YTM_ALB1'}}},
+                                        {'text': ' • '}, {'text': '4:08'},
+                                    ]}}},
+                                ],
+                            }},
+                        ]}},
+                    ]}}}}]}},
+                })
+            if 'music.youtube.com/youtubei/v1/browse' in url:
+                payload = json.loads(body)
+                if payload.get('browseId') == 'MPREb_YTM_ALB1':
+                    return _fake_resp({
+                        'contents': {'twoColumnBrowseResultsRenderer': {
+                            'tabs': [{'tabRenderer': {'content': {'sectionListRenderer': {'contents': [
+                                {'musicResponsiveHeaderRenderer': {
+                                    'title': {'runs': [{'text': 'Random Access Memories'}]},
+                                    'straplineTextOne': {'runs': [{'text': 'Daft Punk'}]},
+                                    'subtitle': {'runs': [{'text': 'Album'}, {'text': ' • '}, {'text': '2013'}]},
+                                    'thumbnail': {'musicThumbnailRenderer': {'thumbnail': {'thumbnails': [{'url': 'https://lh3.googleusercontent.com/ram=w226-h226-l90-rj'}]}}},
+                                }},
+                            ]}}}}],
+                            'secondaryContents': {'sectionListRenderer': {'contents': [
+                                {'musicShelfRenderer': {'contents': [
+                                    {'musicResponsiveListItemRenderer': {
+                                        'playlistItemData': {'videoId': 'ytm_vid_0'},
+                                        'flexColumns': [{'musicResponsiveListItemFlexColumnRenderer': {'text': {'runs': [{'text': 'Give Life Back to Music'}]}}}],
+                                        'fixedColumns': [{'musicResponsiveListItemFixedColumnRenderer': {'text': {'runs': [{'text': '4:35'}]}}}],
+                                    }},
+                                    {'musicResponsiveListItemRenderer': {
+                                        'playlistItemData': {'videoId': 'ytm_vid_1'},
+                                        'flexColumns': [{'musicResponsiveListItemFlexColumnRenderer': {'text': {'runs': [{'text': 'Get Lucky'}]}}}],
+                                        'fixedColumns': [{'musicResponsiveListItemFixedColumnRenderer': {'text': {'runs': [{'text': '4:08'}]}}}],
+                                    }},
+                                ]}},
+                            ]}},
+                        }},
+                    })
+                if payload.get('browseId') == 'MPLYt_1':
+                    return _fake_resp({
+                        'contents': {'sectionListRenderer': {'contents': [
+                            {'musicDescriptionShelfRenderer': {'description': {'runs': [{'text': 'Like the legend of the phoenix'}]}}},
+                        ]}},
+                    })
+            if 'music.youtube.com/youtubei/v1/next' in url:
+                return _fake_resp({
+                    'contents': {'singleColumnMusicWatchNextResultsRenderer': {'tabbedRenderer': {'watchNextTabbedResultsRenderer': {'tabs': [
+                        {'tabRenderer': {'title': 'Up next'}},
+                        {'tabRenderer': {'title': 'Lyrics', 'endpoint': {'browseEndpoint': {'browseId': 'MPLYt_1'}}}},
+                    ]}}}},
+                })
+
+            # Spotify Embed (unconfigured) + Official Web API (configured)
+            if 'open.spotify.com/embed/album/sp_embed_1' in url:
+                next_json = json.dumps({'props': {'pageProps': {'state': {'data': {'entity': {
+                    'title': 'EmbedAlb', 'subtitle': 'EmbedArtist', 'releaseDate': '2020-05-01',
+                    'trackList': [{'uri': 'spotify:track:sp1', 'name': 'EmbedTrack', 'duration': {'totalMilliseconds': 185000}}],
+                }}}}}})
+                return _fake_resp(f'<script id="__NEXT_DATA__" type="application/json">{next_json}</script>')
+            if 'accounts.spotify.com/api/token' in url:
+                return _fake_resp({'access_token': 'tok_sp_123', 'expires_in': 3600})
+            if 'api.spotify.com/v1/search' in url:
+                qs = urllib.parse.parse_qs(urllib.parse.urlsplit(url).query)
+                self.assertEqual(qs.get('limit'), ['10'])
+                if qs.get('type') == ['album']:
+                    return _fake_resp({'albums': {'items': [{
+                        'id': 'sp_alb_1', 'name': 'SpotifyAlb', 'release_date': '2024-06-01',
+                        'artists': [{'name': 'SpArtist'}],
+                        'images': [{'url': 'https://sp.test/alb.jpg'}],
+                    }]}})
+                return _fake_resp({'tracks': {'items': []}})
+            if 'api.spotify.com/v1/albums/sp_alb_1' in url:
+                return _fake_resp({
+                    'id': 'sp_alb_1', 'name': 'SpotifyAlb', 'release_date': '2024-06-01',
+                    'artists': [{'name': 'SpArtist'}], 'genres': ['Synthpop'],
+                    'images': [{'url': 'https://sp.test/alb.jpg'}],
+                    'tracks': {'items': [
+                        {'id': '4uLU6hMCjMI75M1A2tKUQC', 'name': 'SpSong', 'duration_ms': 210000, 'disc_number': 2, 'track_number': 1, 'artists': [{'name': 'SpArtist'}]},
+                    ]},
+                })
+            if 'api.spotify.com/v1/tracks/4uLU6hMCjMI75M1A2tKUQC' in url:
+                return _fake_resp({
+                    'id': '4uLU6hMCjMI75M1A2tKUQC', 'name': 'SpSong', 'track_number': 1,
+                    'artists': [{'name': 'SpArtist'}],
+                    'album': {'id': 'sp_alb_1', 'name': 'SpotifyAlb', 'release_date': '2024-06-01', 'images': [{'url': 'https://sp.test/alb.jpg'}]},
+                })
+            raise AssertionError(f'Unexpected URL in test: {url}')
+
+        try:
+            set_spotify_credentials('', '')
+            clear_caches()
+            self.assertFalse(has_spotify_credentials())
+            self.assertFalse(spotify_provider.supports_album_search)
+
+            # 音源别名解析
+            srcs, inv = parse_source_list('ytm, deezer, lrclib, sp')
+            self.assertEqual(srcs, ('ytmusic', 'deezer', 'lrclib', 'spotify'))
+            self.assertEqual(inv, [])
+
+            # CLI 参数解析验证
+            ns = build_arg_parser().parse_args(['--auto', '--spotify-client-id', 'cid1', '--spotify-client-secret', 'csec1'])
+            self.assertEqual(ns.spotify_client_id, 'cid1')
+            self.assertEqual(ns.spotify_client_secret, 'csec1')
+
+            with patch('track_lookup.urllib.request.urlopen', side_effect=_fake_urlopen):
+                # 1. Deezer 专辑匹配 + LRCLIB 同步歌词跨平台聚合
+                tr_dz = LibraryTrack(
+                    path=os.path.join(self.tmp, 'One More Time.flac'), folder=self.tmp, filename='One More Time.flac',
+                    container='flac', title='One More Time', artist='Daft Punk', album='Discovery',
+                    duration=320.0, disk_size=100, disk_mtime=1.0, foobar_mtime=1.0, status=STATUS_OK,
+                )
+                res_dz = resolve_track_metadata(
+                    tr_dz,
+                    need_track=True, need_date=True, need_cover=True, need_core=True, need_extra=True, need_lyrics=True,
+                    only_sources=('deezer', 'lrclib'),
+                )
+                self.assertEqual(res_dz.tracknumber, 1)
+                self.assertEqual(res_dz.release_date, '2001-03-12')
+                self.assertEqual(res_dz.genre, 'Electronic')
+                self.assertEqual(res_dz.cover_url, 'https://dz.test/discovery_xl.jpg')
+                self.assertEqual(res_dz.lyrics, '[00:15.00]One more time')
+
+                # 2. YouTube Music 专辑匹配 + 封面升级 + 按需歌词
+                tr_ytm = LibraryTrack(
+                    path=os.path.join(self.tmp, 'Get Lucky.flac'), folder=self.tmp, filename='Get Lucky.flac',
+                    container='flac', title='Get Lucky', artist='Daft Punk', album='Random Access Memories',
+                    duration=248.0, disk_size=100, disk_mtime=1.0, foobar_mtime=1.0, status=STATUS_OK,
+                )
+                res_ytm = resolve_track_metadata(
+                    tr_ytm,
+                    need_track=True, need_date=True, need_cover=True, need_lyrics=True,
+                    only_sources=('ytmusic',),
+                )
+                self.assertEqual(res_ytm.tracknumber, 2)
+                self.assertEqual(res_ytm.release_date, '2013')
+                self.assertEqual(res_ytm.cover_url, 'https://lh3.googleusercontent.com/ram=w1200-h1200-l90-rj')
+                self.assertEqual(res_ytm.lyrics, 'Like the legend of the phoenix')
+
+                # 2b. YouTube Music 单曲反查 + 不请求歌词时不触发 next 接口
+                clear_caches()
+                seen_requests.clear()
+                tr_ytm_song = LibraryTrack(
+                    path=os.path.join(self.tmp, 'Get Lucky_single.flac'), folder=self.tmp, filename='Get Lucky.flac',
+                    container='flac', title='Get Lucky', artist='Daft Punk', album='',
+                    duration=248.0, disk_size=100, disk_mtime=1.0, foobar_mtime=1.0, status=STATUS_OK,
+                )
+                res_ytm_song = resolve_track_metadata(
+                    tr_ytm_song,
+                    need_track=True, need_date=True, need_cover=True, need_lyrics=False,
+                    only_sources=('ytmusic',),
+                )
+                self.assertEqual(res_ytm_song.tracknumber, 2)
+                self.assertEqual(res_ytm_song.album_name, 'Random Access Memories')
+                self.assertFalse(any('youtubei/v1/next' in u for u, _ in seen_requests))
+
+                # 3. Spotify 未配置凭据时：搜索直接跳过，Embed 专辑读取保持可用
+                self.assertEqual(spotify_provider.search_album('SpotifyAlb', 'SpotifyAlb', 'SpArtist'), ('', '', False))
+                self.assertEqual(spotify_provider.search_song_hits('SpSong'), [])
+                emb_tracks = spotify_provider.get_album_tracks('sp_embed_1')
+                self.assertEqual(emb_tracks[0]['name'], 'EmbedTrack')
+
+                # 4. 配置 Spotify 官方凭据后：OAuth Token 复用 + 专辑检索 + 22位歌曲ID直查
+                set_spotify_credentials('cid_demo', 'csec_demo')
+                self.assertTrue(has_spotify_credentials())
+                self.assertTrue(spotify_provider.supports_album_search)
+
+                tr_sp = LibraryTrack(
+                    path=os.path.join(self.tmp, 'SpSong.flac'), folder=self.tmp, filename='SpSong.flac',
+                    container='flac', title='SpSong', artist='SpArtist', album='SpotifyAlb',
+                    duration=210.0, disk_size=100, disk_mtime=1.0, foobar_mtime=1.0, status=STATUS_OK,
+                )
+                res_sp = resolve_track_metadata(
+                    tr_sp,
+                    need_track=True, need_date=True, need_cover=True, need_extra=True,
+                    only_sources=('spotify',),
+                )
+                self.assertEqual(res_sp.tracknumber, 1)
+                self.assertEqual(res_sp.discnumber, 2)
+                self.assertEqual(res_sp.release_date, '2024-06-01')
+                self.assertEqual(res_sp.genre, 'Synthpop')
+                self.assertEqual(res_sp.cover_url, 'https://sp.test/alb.jpg')
+
+                tr_sp_id = LibraryTrack(
+                    path=os.path.join(self.tmp, 'SpSong - 4uLU6hMCjMI75M1A2tKUQC.flac'),
+                    folder=self.tmp,
+                    filename='SpSong - 4uLU6hMCjMI75M1A2tKUQC.flac',
+                    container='flac',
+                    title='SpSong',
+                    duration=210.0, disk_size=100, disk_mtime=1.0, foobar_mtime=1.0, status=STATUS_OK,
+                )
+                res_sp_id = resolve_track_metadata(tr_sp_id, need_track=True, need_date=True, only_sources=('spotify',))
+                self.assertEqual(res_sp_id.tracknumber, 1)
+                self.assertIn('Spotify', res_sp_id.source)
+                # 验证同一凭据下 token 仅请求一次
+                self.assertEqual(sum(1 for u, _ in seen_requests if 'accounts.spotify.com/api/token' in u), 1)
+
+                # 5. 验证 SourceConfigDialog 支持配置并保存 Spotify Client ID / Secret
+                with offscreen_tk() as root:
+                    dlg = SourceConfigDialog(
+                        root,
+                        prefer_sources=(),
+                        only_sources=(),
+                        skip_sources=(),
+                        netease_api='',
+                        spotify_client_id='cid_init',
+                        spotify_client_secret='sec_init',
+                    )
+                    dlg.var_sp_id.set('cid_new')
+                    dlg.var_sp_secret.set('sec_new')
+                    with patch('app.messagebox.showinfo'):
+                        dlg._on_confirm()
+                    self.assertEqual(dlg.result['spotify_client_id'], 'cid_new')
+                    self.assertEqual(dlg.result['spotify_client_secret'], 'sec_new')
+
+            # 6. 国际源连续网络失败自动熔断并在 clear_caches 后重置
+            clear_caches()
+            dz_calls = 0
+
+            def _fail_deezer(req, timeout=10):
+                nonlocal dz_calls
+                dz_calls += 1
+                raise OSError('network unreachable')
+
+            with patch('track_lookup.urllib.request.urlopen', side_effect=_fail_deezer):
+                for idx in range(7):
+                    deezer_provider.search_album(f'DZAlb{idx}', f'DZAlb{idx}', f'DZArt{idx}')
+            self.assertEqual(dz_calls, 5)
+            clear_caches()
+            with patch('track_lookup.urllib.request.urlopen', side_effect=_fake_urlopen):
+                aid, _, _ = deezer_provider.search_album('Discovery Daft Punk', 'Discovery', 'Daft Punk')
+            self.assertEqual(aid, '302127')
+        finally:
+            set_spotify_credentials('', '')
             clear_caches()

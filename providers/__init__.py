@@ -6,18 +6,27 @@ from collections.abc import Iterable
 
 from providers.baidu import BaiduProvider
 from providers.base import MusicProvider, TrackMatch
+from providers.deezer import DeezerProvider
 from providers.itunes import ITunesProvider
 from providers.kugou import KugouProvider
 from providers.kuwo import KuwoProvider
+from providers.lrclib import LrclibProvider
 from providers.migu import MiGuProvider
 from providers.musicbrainz import MusicBrainzProvider
 from providers.netease import NetEaseProvider, get_netease_api_base, set_netease_api_base
 from providers.qqmusic import QQMusicProvider
-from providers.spotify import SpotifyProvider
+from providers.spotify import (
+    SpotifyProvider,
+    get_spotify_credentials,
+    has_spotify_credentials,
+    set_spotify_credentials,
+)
+from providers.ytmusic import YouTubeMusicProvider
 
 PRIMARY_PROVIDERS: tuple[str, ...] = ('netease', 'qq', 'itunes', 'mb')
 EXTENDED_CN_PROVIDERS: tuple[str, ...] = ('kugou', 'migu', 'baidu')
-ONLINE_PROVIDERS: tuple[str, ...] = PRIMARY_PROVIDERS + EXTENDED_CN_PROVIDERS
+EXTENDED_INTL_PROVIDERS: tuple[str, ...] = ('deezer', 'ytmusic', 'lrclib', 'spotify')
+ONLINE_PROVIDERS: tuple[str, ...] = PRIMARY_PROVIDERS + EXTENDED_CN_PROVIDERS + EXTENDED_INTL_PROVIDERS
 
 netease_provider = NetEaseProvider()
 qq_provider = QQMusicProvider()
@@ -26,6 +35,9 @@ mb_provider = MusicBrainzProvider()
 kugou_provider = KugouProvider()
 migu_provider = MiGuProvider()
 baidu_provider = BaiduProvider()
+deezer_provider = DeezerProvider()
+ytmusic_provider = YouTubeMusicProvider()
+lrclib_provider = LrclibProvider()
 kuwo_provider = KuwoProvider()
 spotify_provider = SpotifyProvider()
 
@@ -37,6 +49,9 @@ PROVIDERS: dict[str, MusicProvider] = {
     'kugou': kugou_provider,
     'migu': migu_provider,
     'baidu': baidu_provider,
+    'deezer': deezer_provider,
+    'ytmusic': ytmusic_provider,
+    'lrclib': lrclib_provider,
     'kuwo': kuwo_provider,
     'spotify': spotify_provider,
 }
@@ -51,8 +66,11 @@ _SOURCE_ALIASES: dict[str, str] = {
     'kugou': 'kugou', 'kg': 'kugou', '酷狗': 'kugou', '酷狗音乐': 'kugou',
     'migu': 'migu', 'mg': 'migu', '咪咕': 'migu', '咪咕音乐': 'migu',
     'baidu': 'baidu', 'qianqian': 'baidu', '91q': 'baidu', '百度': 'baidu', '百度音乐': 'baidu', '千千': 'baidu', '千千音乐': 'baidu',
+    'deezer': 'deezer', 'dz': 'deezer',
+    'ytmusic': 'ytmusic', 'ytm': 'ytmusic', 'youtube': 'ytmusic', 'youtubemusic': 'ytmusic', 'youtube music': 'ytmusic', 'youtube_music': 'ytmusic',
+    'lrclib': 'lrclib', 'lrc': 'lrclib',
     'kuwo': 'kuwo', 'kw': 'kuwo', '酷我': 'kuwo', '酷我音乐': 'kuwo',
-    'spotify': 'spotify',
+    'spotify': 'spotify', 'sp': 'spotify',
 }
 
 
@@ -108,18 +126,20 @@ def resolve_provider_order(
         if p not in skip and p not in ordered_all:
             ordered_all.append(p)
 
-    # 若用户在 prefer 中明确指定了酷狗/咪咕/千千，则将其纳入主顺序，否则作为扩展兜底顺序
-    explicit_ext = set(prefer_list) & set(EXTENDED_CN_PROVIDERS)
+    # 若用户在 prefer 中明确指定了扩展数据源，则将其纳入主顺序，否则作为扩展兜底顺序
+    explicit_ext = set(prefer_list) & (set(EXTENDED_CN_PROVIDERS) | set(EXTENDED_INTL_PROVIDERS))
     primary = [p for p in ordered_all if p in PRIMARY_PROVIDERS or p in explicit_ext]
     extended = [p for p in ordered_all if p not in primary]
     return tuple(primary), tuple(extended)
 
 
 __all__ = [
-    'EXTENDED_CN_PROVIDERS', 'ONLINE_PROVIDERS', 'PRIMARY_PROVIDERS',
+    'EXTENDED_CN_PROVIDERS', 'EXTENDED_INTL_PROVIDERS', 'ONLINE_PROVIDERS', 'PRIMARY_PROVIDERS',
     'PROVIDERS', 'PROVIDER_LABELS', 'MusicProvider', 'TrackMatch',
-    'baidu_provider', 'get_netease_api_base', 'itunes_provider', 'kugou_provider',
-    'kuwo_provider', 'mb_provider', 'migu_provider', 'netease_provider',
+    'baidu_provider', 'deezer_provider', 'get_netease_api_base', 'get_spotify_credentials',
+    'has_spotify_credentials', 'itunes_provider', 'kugou_provider',
+    'kuwo_provider', 'lrclib_provider', 'mb_provider', 'migu_provider', 'netease_provider',
     'normalize_provider_name', 'parse_source_list', 'qq_provider',
-    'resolve_provider_order', 'set_netease_api_base', 'spotify_provider',
+    'resolve_provider_order', 'set_netease_api_base', 'set_spotify_credentials',
+    'spotify_provider', 'ytmusic_provider',
 ]
