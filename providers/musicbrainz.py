@@ -18,7 +18,7 @@ from providers.base import (
     to_seconds,
 )
 
-MB_UA = 'SongMetadata/1.0 (https://github.com/local/SongMetadata)'
+MB_UA = 'MusicMetadata/1.0 (https://github.com/waves-dylan/MusicMetadata)'
 MB_FAIL_THRESHOLD = 5
 
 _MB_LOCK = threading.Lock()

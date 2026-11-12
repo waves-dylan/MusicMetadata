@@ -1,4 +1,4 @@
-"""SongMetadata 模态设置弹窗组件（删除元数据、手工设置标签、格式转换、在线音源配置）。"""
+"""MusicMetadata 模态设置弹窗组件（删除元数据、手工设置标签、格式转换、在线音源配置）。"""
 
 from __future__ import annotations
 

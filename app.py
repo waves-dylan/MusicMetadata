@@ -1,4 +1,4 @@
-"""SongMetadata — foobar2000 媒体库曲目元数据修复工具（tkinter 主窗口与程序入口）。"""
+"""MusicMetadata — foobar2000 媒体库曲目元数据修复工具（tkinter 主窗口与程序入口）。"""
 
 from __future__ import annotations
 
@@ -190,7 +190,7 @@ class MainWindow:
 
     def __init__(self, root: tk.Tk, auto_scan: bool = False):
         self.root = root
-        self.root.title('SongMetadata')
+        self.root.title('MusicMetadata')
         self._icon_photo = _apply_window_icon(self.root)
         self.root.geometry('1220x760')
         self.root.minsize(920, 560)
@@ -1080,7 +1080,7 @@ def main():
 
     if os.name == 'nt':
         try:
-            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('foobar.musicdl.SongMetadata')
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('foobar.musicdl.MusicMetadata')
         except Exception:
             pass
         try:

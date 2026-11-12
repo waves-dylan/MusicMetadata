@@ -28,7 +28,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name='SongMetadata',
+    name='MusicMetadata',
     icon='assets/app_icon.ico',
     debug=False,
     bootloader_ignore_signals=False,

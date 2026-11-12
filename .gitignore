@@ -3,7 +3,7 @@ __pycache__/
 *.py[cod]
 *$py.class
 
-# PyInstaller build artifacts (keep packaged SongMetadata.exe as requested)
+# PyInstaller build artifacts (keep packaged MusicMetadata.exe as requested)
 build/
 *.manifest
 

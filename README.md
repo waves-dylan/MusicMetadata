@@ -1,6 +1,6 @@
-# SongMetadata 歌曲元数据
+# MusicMetadata 音乐元数据
 
-[![python](https://img.shields.io/badge/python-3-blue)](https://www.python.org/) [![platform](https://img.shields.io/badge/platform-Windows-blue)](https://github.com/waves-dylan/SongMetadata) [![license](https://img.shields.io/github/license/waves-dylan/SongMetadata)](https://github.com/waves-dylan/SongMetadata/blob/main/LICENSE) [![stars](https://img.shields.io/github/stars/waves-dylan/SongMetadata?style=flat&label=stars)](https://github.com/waves-dylan/SongMetadata) [![forks](https://img.shields.io/github/forks/waves-dylan/SongMetadata?style=flat&label=forks)](https://github.com/waves-dylan/SongMetadata/forks) [![watchers](https://img.shields.io/github/watchers/waves-dylan/SongMetadata?style=flat&label=watchers)](https://github.com/waves-dylan/SongMetadata) [![downloads](https://img.shields.io/github/downloads/waves-dylan/SongMetadata/total?style=flat&label=downloads)](https://github.com/waves-dylan/SongMetadata/releases)
+[![python](https://img.shields.io/badge/python-3-blue)](https://www.python.org/) [![platform](https://img.shields.io/badge/platform-Windows-blue)](https://github.com/waves-dylan/MusicMetadata) [![license](https://img.shields.io/github/license/waves-dylan/MusicMetadata)](https://github.com/waves-dylan/MusicMetadata/blob/main/LICENSE) [![stars](https://img.shields.io/github/stars/waves-dylan/MusicMetadata?style=flat&label=stars)](https://github.com/waves-dylan/MusicMetadata) [![forks](https://img.shields.io/github/forks/waves-dylan/MusicMetadata?style=flat&label=forks)](https://github.com/waves-dylan/MusicMetadata/forks) [![watchers](https://img.shields.io/github/watchers/waves-dylan/MusicMetadata?style=flat&label=watchers)](https://github.com/waves-dylan/MusicMetadata) [![downloads](https://img.shields.io/github/downloads/waves-dylan/MusicMetadata/total?style=flat&label=downloads)](https://github.com/waves-dylan/MusicMetadata/releases)
 
 统一集成 **foobar2000 媒体库歌曲元数据检查、获取与缓存刷新**、**封面规范化修复**（含单专辑 `cover.jpg` 与分组标签补全）、**海内外多平台音轨与双语歌词联网补全**、**批量手工标签设置 / 局部清除** 与 **音频格式转换** 的手动媒体库修复工具（GUI + CLI）。
 
@@ -45,7 +45,7 @@
 
 ## 图形界面使用
 
-直接双击运行 [SongMetadata.exe](SongMetadata.exe)（Windows 无控制台窗口版本）或运行 `python app.py`：
+直接双击运行 [MusicMetadata.exe](MusicMetadata.exe)（Windows 无控制台窗口版本）或运行 `python app.py`：
 
 1. **扫描**：启动后不会自动改写或扫描，点击 **「扫描媒体库」**（或右上角 **「选择目录...」** 指定文件夹）开始检查。
 2. **勾选修复模块与音源**：
@@ -99,16 +99,16 @@
   ```bash
   python -m unittest discover -s tests -v
   ```
-- **打包单文件 EXE**（输出至 `dist/SongMetadata.exe`，复制更新根目录 `SongMetadata.exe` 后可清理 `dist` 与 `build` 目录）：
+- **打包单文件 EXE**（输出至 `dist/MusicMetadata.exe`，复制更新根目录 `MusicMetadata.exe` 后可清理 `dist` 与 `build` 目录）：
   ```bash
   pip install pyinstaller
-  pyinstaller --clean --noconfirm SongMetadata.spec
+  pyinstaller --clean --noconfirm MusicMetadata.spec
   ```
 
 ## 项目结构
 
 ```text
-SongMetadata/
+MusicMetadata/
 ├── app.py               # tkinter 主窗口 GUI 与程序总入口
 ├── runner.py            # 修复、删除、设值与格式转换批量执行引擎与并发调度
 ├── dialogs.py           # 删除元数据、手工设值、格式转换与数据源配置弹窗
@@ -138,7 +138,7 @@ SongMetadata/
 │   ├── test_art_repair.py
 │   ├── test_providers_lookup.py
 │   └── test_cli_gui.py
-├── SongMetadata.spec    # PyInstaller 单文件打包配置
-├── SongMetadata.exe     # Windows 单文件可执行程序
+├── MusicMetadata.spec   # PyInstaller 单文件打包配置
+├── MusicMetadata.exe    # Windows 单文件可执行程序
 └── requirements.txt     # 最小运行依赖清单
 ```

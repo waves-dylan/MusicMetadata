@@ -68,7 +68,7 @@ class CliGuiTests(TempTrackTestCase):
                 # 默认打开界面时不应自动扫描
                 win = app_mod.MainWindow(root)
                 root.update()
-                self.assertEqual(root.title(), 'SongMetadata')
+                self.assertEqual(root.title(), 'MusicMetadata')
                 m_env.assert_not_called()
                 m_scan.assert_not_called()
                 self.assertFalse(win._has_scanned)

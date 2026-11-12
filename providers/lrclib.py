@@ -13,7 +13,7 @@ from providers.base import (
 )
 
 _LRCLIB_CB = ProviderCircuitBreaker(threshold=5)
-_LRCLIB_HEADERS = {'User-Agent': 'SongMetadata/1.0 (https://github.com/waves-dylan/SongMetadata)'}
+_LRCLIB_HEADERS = {'User-Agent': 'MusicMetadata/1.0 (https://github.com/waves-dylan/MusicMetadata)'}
 
 
 def _lrclib_get(url: str, params=None):

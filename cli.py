@@ -1,4 +1,4 @@
-"""SongMetadata 命令行参数解析与批处理入口（供 CLI 模式与无界面自动化调用）。"""
+"""MusicMetadata 命令行参数解析与批处理入口（供 CLI 模式与无界面自动化调用）。"""
 
 from __future__ import annotations
 
@@ -213,7 +213,7 @@ def run_cli(args) -> int:
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog='SongMetadata', description='SongMetadata — foobar2000 媒体库曲目元数据修复工具')
+    parser = argparse.ArgumentParser(prog='MusicMetadata', description='MusicMetadata — foobar2000 媒体库曲目元数据修复工具')
     parser.add_argument('--auto', action='store_true', help='无界面自动扫描并执行修复')
     parser.add_argument('--dry-run', action='store_true', help='只扫描和预览待修复项目，不修改文件')
     parser.add_argument('--sync-only', action='store_true', help='仅检查并刷新 foobar 元数据缓存')
