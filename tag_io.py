@@ -8,6 +8,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import tempfile
 import time
 from ctypes import wintypes
@@ -30,6 +31,10 @@ AUDIO_EXTS = {
     '.ogg', '.oga', '.opus', '.wav', '.wave', '.aiff', '.aif', '.aifc',
     '.wma', '.asf', '.ape', '.wv',
 }
+
+SUPPORTS_EMBEDDED_LYRICS = {'flac', 'mp3', 'mp4', 'ogg', 'opus', 'asf', 'aiff', 'wav', 'ape', 'wv'}
+PREFER_EXTERNAL_LRC_CONTAINERS = {'wav', 'ape', 'wv'}
+CONVERT_TARGET_FORMATS = ('flac', 'mp3', 'm4a', 'ogg', 'opus', 'wav', 'aiff')
 
 _EXT_FAMILY = {
     'flac': 'flac', 'mp3': 'mp3', 'mp2': 'mp3', 'mpa': 'mp3',
@@ -181,6 +186,51 @@ def extension_mismatch(path: str, container: str | None = None) -> bool:
     return bool(cur and exp and cur != exp)
 
 
+def container_family(audio, container: str | None = None) -> str:
+    """将具体容器名或 mutagen 对象归并为统一标签族（id3/vorbis/mp4/asf/ape）。"""
+    c = (container or '').lower()
+    if c in ('flac', 'ogg', 'opus'):
+        return 'vorbis'
+    if c == 'mp4' or isinstance(audio, MP4):
+        return 'mp4'
+    if c == 'asf':
+        return 'asf'
+    if c in ('ape', 'wv'):
+        return 'ape'
+    tags_obj = getattr(audio, 'tags', audio) if audio is not None else None
+    if c in ('mp3', 'wav', 'aiff') or isinstance(tags_obj, ID3):
+        return 'id3'
+    return ''
+
+
+def ensure_tags(audio):
+    """确保 mutagen 音频对象已初始化 tags 容器并返回。"""
+    if audio is None:
+        return None
+    if getattr(audio, 'tags', None) is None and hasattr(audio, 'add_tags'):
+        audio.add_tags()
+    return getattr(audio, 'tags', None)
+
+
+def iter_tag_values(val) -> list:
+    if val is None:
+        return []
+    if hasattr(val, '__iter__') and not isinstance(val, (str, bytes, bytearray)):
+        return list(val)
+    return [val]
+
+
+def delete_keys_ci(tags, *keys: str) -> bool:
+    """按大小写无关方式删除指定键，返回是否至少删掉一项。"""
+    if tags is None or not keys:
+        return False
+    targets = {k.lower() for k in keys}
+    matched = [k for k in list(tags.keys()) if str(k).lower() in targets]
+    for k in matched:
+        del tags[k]
+    return bool(matched)
+
+
 def _as_text(value) -> str:
     if value is None:
         return ''
@@ -275,14 +325,60 @@ def _read_id3_performer(tags) -> str:
     return ', '.join(dict.fromkeys(vals))
 
 
+_EMBEDDED_LYRICS_KEYS = {
+    'vorbis': ('LYRICS', 'UNSYNCEDLYRICS', 'UNSYNCED LYRICS'),
+    'asf': ('WM/Lyrics',),
+    'ape': ('Lyrics', 'LYRICS'),
+}
+
+
+def _read_embedded_lyrics(tags, container: str | None) -> str:
+    if tags is None:
+        return ''
+    fam = container_family(tags, container)
+    if fam == 'id3':
+        try:
+            frames = tags.getall('USLT')
+        except Exception:
+            frames = []
+        parts = [str(getattr(f, 'text', '') or '').strip() for f in frames]
+        return '\n\n'.join(p for p in parts if p)
+    if fam == 'mp4':
+        return _as_text(tags.get('\xa9lyr'))
+    keys = _EMBEDDED_LYRICS_KEYS.get(fam, ())
+    return _tag_text(tags, *keys) if keys else ''
+
+
+def get_lrc_path(audio_path: str) -> str:
+    return os.path.splitext(audio_path)[0] + '.lrc'
+
+
+def read_lrc_file(audio_path: str) -> str:
+    lrc_path = get_lrc_path(audio_path)
+    if not os.path.isfile(lrc_path):
+        return ''
+    try:
+        with open(lrc_path, 'rb') as fp:
+            raw = fp.read()
+        for enc in ('utf-8-sig', 'utf-8', 'gb18030'):
+            try:
+                return raw.decode(enc).strip()
+            except UnicodeDecodeError:
+                continue
+        return raw.decode('utf-8', errors='replace').strip()
+    except OSError:
+        return ''
+
+
 def read_audio_info(path: str) -> dict:
-    """读取音频基础标签、扩展元数据、时长与音轨号状态。"""
+    """读取音频基础标签、扩展元数据、歌词、时长与音轨号状态。"""
     info = {
         'path': path, 'container': None, 'extension_mismatch': False,
         'title': '', 'artist': '', 'albumartist': '', 'album': '', 'date': '',
         'composer': '', 'performer': '', 'genre': '',
         'tracknumber': '', 'track_int': None, 'discnumber': '', 'disc_int': None,
         'comment': '', 'raw_comment': '', 'has_163_key': False,
+        'lyrics': '', 'has_embedded_lyrics': False, 'has_lrc_file': False, 'has_lyrics': False,
         'netease_meta': None, 'duration': 0.0, 'error': None,
     }
     if not os.path.exists(path):
@@ -303,6 +399,7 @@ def read_audio_info(path: str) -> dict:
         return info
 
     tags = getattr(audio, 'tags', None)
+    emb_lyrics = ''
     if tags:
         if container in ('flac', 'ogg', 'opus', 'asf', 'ape', 'wv'):
             fam = 'vorbis' if container in ('flac', 'ogg', 'opus') else ('asf' if container == 'asf' else 'ape')
@@ -338,7 +435,13 @@ def read_audio_info(path: str) -> dict:
                 val = tags.get(key)
                 if val and isinstance(val, list) and val[0] and val[0][0]:
                     info[field] = str(val[0][0])
+        emb_lyrics = _read_embedded_lyrics(tags, container)
 
+    lrc_text = read_lrc_file(path)
+    info['has_embedded_lyrics'] = bool(emb_lyrics)
+    info['has_lrc_file'] = bool(lrc_text)
+    info['has_lyrics'] = bool(emb_lyrics or lrc_text)
+    info['lyrics'] = emb_lyrics or lrc_text
     info['track_int'] = _parse_track_int(info['tracknumber'])
     info['disc_int'] = _parse_track_int(info['discnumber'])
     raw_cmt = info['raw_comment'] or info['comment']
@@ -535,40 +638,37 @@ def atomic_mutate_audio(
     return False, last_issue
 
 
+_TRACK_KV_MAP = {
+    'vorbis': ('TRACKNUMBER', 'DISCNUMBER', ('DISCNUMBER', 'DISC')),
+    'asf': ('WM/TrackNumber', 'WM/PartOfSet', ('WM/PartOfSet',)),
+    'ape': ('Track', 'Disc', ('Disc', 'DISC', 'DISCNUMBER')),
+}
+
+
 def apply_track_to_audio(audio, container: str, tracknumber: int | None = None,
                          discnumber: int | None = None, write_disc_if_missing: bool = False) -> None:
-    if getattr(audio, 'tags', None) is None and hasattr(audio, 'add_tags'):
-        audio.add_tags()
-    tags = audio.tags
+    tags = ensure_tags(audio)
+    fam = container_family(audio, container)
     tn = str(int(tracknumber)) if tracknumber is not None else ''
     dn = str(int(discnumber)) if discnumber else ''
-    if container in ('flac', 'ogg', 'opus'):
+    if fam in _TRACK_KV_MAP and tags is not None:
+        tn_key, dn_key, dn_read_keys = _TRACK_KV_MAP[fam]
         if tn:
-            tags['TRACKNUMBER'] = [tn]
-        if write_disc_if_missing and dn and not _tag_text(tags, 'DISCNUMBER', 'DISC'):
-            tags['DISCNUMBER'] = [dn]
-    elif container in ('mp3', 'wav', 'aiff'):
+            tags[tn_key] = [tn]
+        if write_disc_if_missing and dn and not _tag_text(tags, *dn_read_keys):
+            tags[dn_key] = [dn]
+    elif fam == 'id3' and tags is not None:
         if tn:
             tags.setall('TRCK', [TRCK(encoding=3, text=[tn])])
         if write_disc_if_missing and dn and not _id3_text(tags, 'TPOS'):
             tags.setall('TPOS', [TPOS(encoding=3, text=[dn])])
-    elif container == 'mp4':
+    elif fam == 'mp4' and tags is not None:
         if tn:
             ex = tags.get('trkn')
             tot = ex[0][1] if (ex and isinstance(ex[0], tuple) and len(ex[0]) > 1) else 0
             tags['trkn'] = [(int(tracknumber), int(tot or 0))]
         if write_disc_if_missing and discnumber and not tags.get('disk'):
             tags['disk'] = [(int(discnumber), 0)]
-    elif container == 'asf':
-        if tn:
-            tags['WM/TrackNumber'] = [tn]
-        if write_disc_if_missing and dn and not tags.get('WM/PartOfSet'):
-            tags['WM/PartOfSet'] = [dn]
-    elif container in ('ape', 'wv'):
-        if tn:
-            tags['Track'] = [tn]
-        if write_disc_if_missing and dn and not _tag_text(tags, 'Disc', 'DISC', 'DISCNUMBER'):
-            tags['Disc'] = [dn]
     else:
         raise RuntimeError(f'暂不支持写入 {container} 格式')
 
@@ -597,3 +697,275 @@ def write_tracknumber(
         attempts=attempts,
         retry_delay=retry_delay,
     )
+
+
+# ==================== 文件名解析、歌词合并/外挂 & 格式转换 ====================
+_TEMP_SUFFIX_RE = re.compile(r'^(.+)\.[a-z0-9_]{6,10}$', re.IGNORECASE)
+_IDENT_RE = re.compile(r' - ([A-Za-z0-9]{5,32})(?: \(\d+\))?$')
+_TRACK_PREFIX_RE = re.compile(r'^(?:(?:\d{1,2}-)?\d{1,2}|0\d{2})\s*(?:\.\s*|-\s+|_\s*)(?=\S)')
+_TRACK_DOT_PREFIX_RE = re.compile(r'^(?:(?:\d{1,2}-)?\d{1,2}|0\d{2})\.(?=\S)')
+_DATE_DIR_RE = re.compile(r'^\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2}\s+')
+_CJK_RE = re.compile(r'[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]')
+_GENERIC_DIRS = {
+    'music', 'downloads', 'cloudmusicdownload', 'vipsongsdownload', '已下载音乐',
+    'applemusicclient', 'kugoumusicclient', 'kuwomusicclient', 'migumusicclient',
+    'neteasemusicclient', 'qqmusicclient', 'spotifymusicclient',
+}
+_LRC_TIME_TOKEN_RE = re.compile(r'\[(\d{1,3}):(\d{2})(?:[.:](\d{1,3}))?\]')
+
+
+def _clean_filename_stem(filename: str) -> str:
+    stem = os.path.splitext(os.path.basename(filename))[0]
+    m = _TEMP_SUFFIX_RE.match(stem)
+    return m.group(1) if m else stem
+
+
+def _strip_safe_track_prefix(text: str) -> str:
+    s = str(text or '').strip()
+    m = _TRACK_PREFIX_RE.match(s)
+    if m:
+        return s[m.end():].strip()
+    m2 = _TRACK_DOT_PREFIX_RE.match(s)
+    if m2:
+        return s[m2.end():].strip()
+    return s
+
+
+def parse_filename_clues(filename_or_path: str, folder: str = '') -> dict:
+    """从文件名与目录名安全推断 song_id / title / artist / album（不误伤数字开头歌名）。"""
+    fname = os.path.basename(filename_or_path)
+    fld = folder or os.path.dirname(filename_or_path)
+    stem = _clean_filename_stem(fname)
+    m = _IDENT_RE.search(stem)
+    ident, part = (m.group(1), stem[:m.start()].strip()) if m else ('', stem)
+    title, artist, album = '', '', ''
+
+    bm = re.match(r'^(.+?)\s*-\s*([^\[\]]+?)\[([^\[\]]+)\]$', part)
+    if bm:
+        title, artist, album = bm.group(1).strip(), bm.group(2).strip(), bm.group(3).strip().replace('~', '/')
+    elif not ident:
+        cleaned = _strip_safe_track_prefix(part)
+        if ' - ' in cleaned:
+            left, right = cleaned.split(' - ', 1)
+            if re.match(r'^\d{1,3}$', left.strip()) and int(left.strip()) <= 99:
+                title = right.strip()
+            else:
+                artist, title = left.strip(), right.strip()
+        elif cleaned.count('-') == 1 and _CJK_RE.search(cleaned):
+            left, right = cleaned.split('-', 1)
+            ls, rs = left.strip(), right.strip()
+            if ls and rs and not ls.isdigit():
+                artist, title = ls, rs
+            else:
+                title = cleaned
+        else:
+            title = cleaned
+    else:
+        title = part
+
+    if not album and fld:
+        dn = os.path.basename(fld).strip()
+        if dn and dn.lower() not in _GENERIC_DIRS:
+            cd = _DATE_DIR_RE.sub('', dn).strip()
+            if cd and cd.lower() not in _GENERIC_DIRS:
+                album = cd
+    return {'identifier': ident, 'inferred_title': title, 'inferred_artist': artist, 'inferred_album': album}
+
+
+def _norm_lrc_ts(mm: str, ss: str, frac: str | None) -> tuple[int, int, int]:
+    f = (frac or '0').ljust(3, '0')[:3]
+    return int(mm), int(ss), int(f) // 10
+
+
+def merge_lyrics(original: str, translation: str) -> str:
+    """按 LRC 时间标签将原文歌词与翻译歌词逐行合并。"""
+    orig = str(original or '').replace('\r\n', '\n').strip()
+    trans = str(translation or '').replace('\r\n', '\n').strip()
+    if not orig:
+        return trans
+    if not trans:
+        return orig
+
+    trans_exact: dict[str, str] = {}
+    trans_norm: dict[tuple[int, int, int], str] = {}
+    for raw_line in trans.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        tokens = list(_LRC_TIME_TOKEN_RE.finditer(line))
+        if not tokens:
+            continue
+        text = _LRC_TIME_TOKEN_RE.sub('', line).strip()
+        if not text or text == '//':
+            continue
+        for tok in tokens:
+            trans_exact.setdefault(tok.group(0), text)
+            trans_norm.setdefault(_norm_lrc_ts(tok.group(1), tok.group(2), tok.group(3)), text)
+
+    if not trans_exact:
+        return orig
+
+    out: list[str] = []
+    for raw_line in orig.splitlines():
+        line = raw_line.rstrip()
+        out.append(line)
+        tokens = list(_LRC_TIME_TOKEN_RE.finditer(line))
+        if not tokens:
+            continue
+        orig_text = _LRC_TIME_TOKEN_RE.sub('', line).strip()
+        if not orig_text:
+            continue
+        tr_text = ''
+        for tok in tokens:
+            tr_text = trans_exact.get(tok.group(0)) or trans_norm.get(_norm_lrc_ts(tok.group(1), tok.group(2), tok.group(3))) or ''
+            if tr_text:
+                break
+        if tr_text and tr_text != orig_text:
+            prefix = ''.join(tok.group(0) for tok in tokens)
+            out.append(f'{prefix}{tr_text}')
+    return '\n'.join(out)
+
+
+def write_lrc_file(
+    audio_path: str,
+    lyrics: str,
+    *,
+    title: str = '',
+    artist: str = '',
+    album: str = '',
+    overwrite: bool = True,
+) -> tuple[bool, str]:
+    """将歌词原子写入同名 .lrc 文件（自动补充缺失的 [ti:]/[ar:]/[al:] 头）。"""
+    txt = str(lyrics or '').replace('\r\n', '\n').strip()
+    if not txt:
+        return False, '歌词内容为空'
+    lrc_path = get_lrc_path(audio_path)
+    if not overwrite and os.path.isfile(lrc_path):
+        return True, '外置 .lrc 已存在，跳过覆盖'
+
+    low = txt.lower()
+    headers: list[str] = []
+    if title and '[ti:' not in low:
+        headers.append(f'[ti:{title}]')
+    if artist and '[ar:' not in low:
+        headers.append(f'[ar:{artist}]')
+    if album and '[al:' not in low:
+        headers.append(f'[al:{album}]')
+    content = ('\n'.join(headers) + '\n' + txt if headers else txt) + '\n'
+
+    folder = os.path.dirname(lrc_path) or '.'
+    stem = os.path.splitext(os.path.basename(lrc_path))[0]
+    tmp_path = None
+    try:
+        fd, tmp_path = tempfile.mkstemp(prefix=stem + '.', suffix='.lrctmp', dir=folder)
+        with os.fdopen(fd, 'w', encoding='utf-8', newline='\n') as fp:
+            fp.write(content)
+        os.replace(tmp_path, lrc_path)
+        tmp_path = None
+        return True, f'已保存外置歌词 {os.path.basename(lrc_path)}'
+    except OSError as err:
+        return False, f'写入 .lrc 失败: {err}'
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            _remove_file_with_retry(tmp_path, attempts=3, base_delay=0.1)
+
+
+def delete_lrc_file(audio_path: str) -> tuple[bool, str]:
+    """删除同名外置 .lrc 文件。"""
+    lrc_path = get_lrc_path(audio_path)
+    if not os.path.isfile(lrc_path):
+        return True, '无外置 .lrc 文件'
+    if _remove_file_with_retry(lrc_path, attempts=4, base_delay=0.15):
+        return True, f'已删除 {os.path.basename(lrc_path)}'
+    return False, f'删除 {os.path.basename(lrc_path)} 失败'
+
+
+def find_ffmpeg() -> str | None:
+    return shutil.which('ffmpeg')
+
+
+def convert_audio_file(
+    input_path: str,
+    target_format: str,
+    *,
+    overwrite: bool = False,
+    delete_source: bool = False,
+    copy_sidecar_lrc: bool = True,
+    post_hook=None,
+) -> tuple[bool, str, str]:
+    """使用 ffmpeg 将音频转为目标格式（保留元数据，支持后置封面/标签校验与原子替换）。"""
+    fmt = str(target_format or '').strip().lower().lstrip('.')
+    if fmt not in CONVERT_TARGET_FORMATS:
+        return False, f'不支持的目标格式: {fmt}', ''
+    if not input_path or not os.path.isfile(input_path):
+        return False, '源文件不存在', ''
+    ffmpeg_bin = find_ffmpeg()
+    if not ffmpeg_bin:
+        return False, '未找到 ffmpeg，请先安装 ffmpeg 并加入系统 PATH', ''
+
+    folder = os.path.dirname(input_path) or '.'
+    stem = os.path.splitext(os.path.basename(input_path))[0]
+    output_path = os.path.join(folder, f'{stem}.{fmt}')
+    if os.path.normcase(os.path.abspath(input_path)) == os.path.normcase(os.path.abspath(output_path)):
+        return True, f'已是 .{fmt} 格式，跳过', output_path
+    if os.path.exists(output_path) and not overwrite:
+        return False, f'目标文件已存在（开启覆盖可替换）: {os.path.basename(output_path)}', output_path
+
+    temp_path = None
+    try:
+        fd, temp_path = tempfile.mkstemp(prefix=stem + '.', suffix=f'.musictmp.{fmt}', dir=folder)
+        os.close(fd)
+        cmd = [
+            ffmpeg_bin, '-y', '-hide_banner', '-loglevel', 'error',
+            '-i', input_path,
+            '-map', '0:a:0',
+            '-map_metadata', '0',
+            temp_path,
+        ]
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            encoding='utf-8',
+            errors='replace',
+            creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0),
+        )
+        if proc.returncode != 0:
+            err_txt = (proc.stderr or proc.stdout or '').strip()
+            return False, f'ffmpeg 转换失败: {err_txt or f"exit={proc.returncode}"}', ''
+
+        if post_hook is not None:
+            ok_hook, hook_msg = post_hook(input_path, temp_path, fmt)
+            if not ok_hook:
+                return False, hook_msg or '转换后处理失败', ''
+
+        chk = read_audio_info(temp_path)
+        if chk.get('error'):
+            return False, f"转换输出校验失败: {chk['error']}", ''
+
+        os.replace(temp_path, output_path)
+        temp_path = None
+        try:
+            bump_mtime(output_path)
+        except OSError:
+            pass
+
+        if copy_sidecar_lrc:
+            src_lrc = get_lrc_path(input_path)
+            dst_lrc = get_lrc_path(output_path)
+            if os.path.isfile(src_lrc) and os.path.normcase(src_lrc) != os.path.normcase(dst_lrc):
+                if overwrite or not os.path.exists(dst_lrc):
+                    try:
+                        shutil.copy2(src_lrc, dst_lrc)
+                    except OSError:
+                        pass
+
+        if delete_source:
+            _remove_file_with_retry(input_path, attempts=4, base_delay=0.2)
+
+        return True, f'已转换为 {os.path.basename(output_path)}', output_path
+    except Exception as err:
+        return False, f'{type(err).__name__}: {err}', ''
+    finally:
+        if temp_path and os.path.exists(temp_path):
+            _remove_file_with_retry(temp_path, attempts=3, base_delay=0.15)

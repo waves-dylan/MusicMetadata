@@ -25,12 +25,12 @@ STATUS_OK = 'ok'
 STATUS_ERROR = 'error'
 
 CORE_TEXT_FIELDS = ('title', 'artist', 'albumartist', 'album', 'date')
-EXTRA_TEXT_FIELDS = ('composer', 'performer', 'genre', 'discnumber')
+EXTRA_TEXT_FIELDS = ('composer', 'genre', 'discnumber')
 FIELD_LABELS = {
     'title': '标题', 'artist': '艺术家', 'albumartist': '专辑艺术家',
     'album': '专辑', 'date': '日期', 'composer': '作曲',
     'performer': '表演者', 'genre': '流派', 'tracknumber': '音轨号',
-    'discnumber': '碟片编号', 'comment': '注释', 'cover': '封面',
+    'discnumber': '碟片编号', 'comment': '注释', 'lyrics': '歌词', 'cover': '封面',
 }
 
 _TEMP_COPY_RE = re.compile(r'^(.+)\.[a-z0-9_]{6,10}$', re.IGNORECASE)
@@ -67,6 +67,10 @@ class LibraryTrack:
     disk_disc_int: int | None = None
     comment: str = ''
     has_163_key: bool = False
+    has_lyrics: bool = False
+    has_embedded_lyrics: bool = False
+    has_lrc_file: bool = False
+    needs_lyrics: bool = False
     netease_meta: dict | None = None
     container: str | None = None
     extension_mismatch: bool = False
@@ -425,12 +429,15 @@ def track_has_pending_work(
     enable_track: bool = True, enable_art: bool = True, enable_tags: bool = True,
     enable_sync: bool = True, skip_full_album: bool = True, enable_extra_tags: bool = False,
     enabled_tag_fields: set[str] | frozenset[str] | None = None,
+    enable_lyrics: bool = False,
 ) -> bool:
     if track.status == STATUS_ERROR or track.is_temp_duplicate:
         return False
     if enable_track and track.needs_tracknumber and not (skip_full_album and track.is_full_album):
         return True
     if enable_art and (track.needs_cover_fix or track.needs_cover_online or track.folder_cover_action in ('create', 'rewrite', 'remove')):
+        return True
+    if enable_lyrics and track.needs_lyrics and not (skip_full_album and track.is_full_album):
         return True
     if enable_tags:
         if enabled_tag_fields is None:
@@ -664,6 +671,10 @@ def scan_library(env: FoobarEnv, folders: list[str] | None = None, progress_cb=N
             disk_tracknumber=info.get('tracknumber') or '', disk_track_int=info.get('track_int'),
             disk_discnumber=info.get('discnumber') or '', disk_disc_int=info.get('disc_int'),
             comment=info.get('comment') or '', has_163_key=bool(info.get('has_163_key')),
+            has_lyrics=bool(info.get('has_lyrics')),
+            has_embedded_lyrics=bool(info.get('has_embedded_lyrics')),
+            has_lrc_file=bool(info.get('has_lrc_file')),
+            needs_lyrics=bool(not info.get('error') and not temp_dup and not info.get('has_lyrics')),
             netease_meta=info.get('netease_meta'), container=info.get('container'),
             extension_mismatch=bool(info.get('extension_mismatch')), error=info.get('error'),
             foobar_in_db=fb is not None, foobar_tracknumber=fb['tracknumber'] if fb else '',
