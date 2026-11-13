@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 
-from art_repair import (
+from services.art import (
     DELETABLE_FIELDS,
     apply_track_deletions,
     delete_folder_artist_file,

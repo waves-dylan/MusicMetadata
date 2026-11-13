@@ -108,7 +108,7 @@ def _append_note(track: LibraryTrack, item: str) -> None:
 
 def reconcile_album_consistency(tracks: list[LibraryTrack]) -> None:
     """跨目录按同专辑校对并统一不一致的 DATE 与混用的空/非空 DISCNUMBER。"""
-    from art_repair import pick_canonical_album_date
+    from services.art import pick_canonical_album_date
 
     groups: dict[tuple[str, str], list[LibraryTrack]] = {}
     for tr in tracks:
@@ -176,7 +176,7 @@ def scan_library(
     diff_finder: Callable | None = None,
 ) -> list[LibraryTrack]:
     """扫描本地音乐目录并结合可选播放器缓存、封面与标签健康度判定待修状态。"""
-    from art_repair import analyze_folder_art_and_tags
+    from services.art import analyze_folder_art_and_tags
 
     env_folders = list(getattr(env, 'library_folders', ()) or ()) if env is not None else []
     target_folders = folders if folders is not None else env_folders

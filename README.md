@@ -137,8 +137,8 @@
 5. **表现层 (`ui/`)**
    - `ui.main_window`：基于 Tkinter 的响应式现代双栏主界面 (`MainWindow`)、异步事件队列分发与单元格数据呈现。
    - `ui.dialogs`：按业务独立划分的模态弹窗（删除确认、手工设标、格式转换、音源优先级与音乐目录管理）。
-6. **兼容门面设计 (Facade Compatibility)**
-   - 根目录下保留 `runner.py`、`art_repair.py`、`dialogs.py`、`foobar_library.py`、`library_scan.py`、`user_config.py` 作为轻量门面，对外提供 100% 导入兼容性，第三方调用与现有测试无需任何修改。
+6. **极简清晰的顶层入口 (Minimal Top-Level)**
+   - 消除所有历史过渡冗余文件，根目录下仅保留极简启动入口 `app.py`、命令行引擎 `cli.py` 与容器底层 IO `tag_io.py`，全项目与单元测试 100% 采用清晰的现代分层包导入规范。
 
 ---
 
@@ -245,13 +245,6 @@ MusicMetadata/
 ├── app.py                               # 极简程序总入口 (GUI + CLI 统一分流)
 ├── cli.py                               # 命令行参数解析引擎
 ├── tag_io.py                            # 底层音频容器读写与转码支持
-├── track_lookup.py                      # 在线检索向后兼容门面
-├── runner.py                            # 执行流水线向后兼容门面
-├── art_repair.py                        # 图像修复向后兼容门面
-├── dialogs.py                           # 弹窗向后兼容门面
-├── foobar_library.py                    # foobar 媒体库向后兼容门面
-├── library_scan.py                      # 本地扫描向后兼容门面
-├── user_config.py                       # 用户配置向后兼容门面
 ├── MusicMetadata.spec                   # PyInstaller 自动依赖打包配置
 ├── MusicMetadata.exe                    # Windows 独立免安装单文件程序
 └── requirements.txt                     # 最小运行依赖声明

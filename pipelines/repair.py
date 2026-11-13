@@ -7,7 +7,12 @@ import sys
 import time
 from collections import Counter
 
-from art_repair import (
+from core.constants import STATUS_ERROR
+from core.models import FoobarEnv, FolderArtPlan, LibraryTrack, TrackMatch
+from pipelines.executor import _run_pool_cancellable, _sync_foobar_targets
+from pipelines.options import FixOptions
+from providers.base import _VA_ARTISTS, first_artist, norm_core
+from services.art import (
     ARTIST_MAX_SIDE,
     MAX_SIDE,
     SUPPORTS_ARTIST_WRITE,
@@ -18,12 +23,7 @@ from art_repair import (
     normalize_jpeg,
     pick_canonical_album_date,
 )
-from core.constants import STATUS_ERROR
-from core.models import FoobarEnv, FolderArtPlan, LibraryTrack, TrackMatch
-from pipelines.executor import _run_pool_cancellable, _sync_foobar_targets
-from pipelines.options import FixOptions
-from providers.base import _VA_ARTISTS, first_artist, norm_core
-from track_lookup import (
+from services.lookup import (
     clear_caches,
     fetch_artist_bytes,
     fetch_cover_bytes,
@@ -39,11 +39,6 @@ from track_lookup import (
 
 
 def resolve_hook(name: str, current):
-    runner_mod = sys.modules.get('runner')
-    if runner_mod is not None:
-        rh = getattr(runner_mod, 'resolve_hook', None)
-        if rh is not None and rh is not resolve_hook:
-            return rh(name, current)
     from pipelines.executor import resolve_hook as _exec_resolve_hook
     return _exec_resolve_hook(name, current)
 

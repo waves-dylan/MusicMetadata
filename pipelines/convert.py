@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 
-from art_repair import convert_track_format
+from services.art import convert_track_format
 from core.constants import CONVERT_TARGET_FORMATS, STATUS_ERROR
 from core.models import FoobarEnv, LibraryTrack
 from pipelines.executor import _run_pool_cancellable, _sync_foobar_targets, resolve_hook

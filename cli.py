@@ -6,10 +6,10 @@ import argparse
 import os
 import sys
 
-from art_repair import DELETABLE_FIELDS, LYRICS_MODES, parse_set_tags
-from foobar_library import FIELD_LABELS, STATUS_ERROR, detect_foobar_env, scan_library
-from providers import ONLINE_PROVIDERS
-from runner import (
+from core.config import get_default_music_folders, has_foobar_env, load_user_config, normalize_folder_list
+from core.constants import FIELD_LABELS, STATUS_ERROR
+from infra.integrations.foobar import detect_foobar_env, scan_library
+from pipelines import (
     ConvertOptions,
     DeleteOptions,
     FixOptions,
@@ -21,9 +21,10 @@ from runner import (
     execute_set_tags,
     parse_delete_fields,
 )
+from providers import ONLINE_PROVIDERS
+from services.art import DELETABLE_FIELDS, LYRICS_MODES, parse_set_tags
+from services.lookup import parse_source_list
 from tag_io import CONVERT_TARGET_FORMATS, find_ffmpeg
-from track_lookup import parse_source_list
-from user_config import get_default_music_folders, has_foobar_env, load_user_config, normalize_folder_list
 
 _ORIG_CLI_HOOKS = {
     'detect_foobar_env': detect_foobar_env,

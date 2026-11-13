@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 from core.constants import DELETABLE_FIELDS, FIELD_LABELS, FOLDER_COVER_LABELS
 from core.models import LibraryTrack, TrackMatch
-from library_scan import track_has_pending_work
+from infra.scanner import track_has_pending_work
 
 
 @dataclass

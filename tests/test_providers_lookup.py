@@ -16,7 +16,8 @@ from PIL import Image
 
 from app import SourceConfigDialog
 from cli import build_arg_parser
-from foobar_library import STATUS_OK, LibraryTrack
+from core.constants import STATUS_OK
+from core.models import LibraryTrack
 from providers import (
     TrackMatch,
     baidu_provider,
@@ -55,7 +56,7 @@ from providers.musicbrainz import MB_FAIL_THRESHOLD, is_mb_circuit_open
 from providers.netease import build_netease_tracks
 from providers.theaudiodb import _extract_tadb_composer
 from tests.common import FakeHTTPResponse, TempTrackTestCase, offscreen_tk
-from track_lookup import (
+from services.lookup.resolver import (
     _merge_match,
     _parse_filename_clues,
     clear_caches,
@@ -141,7 +142,7 @@ class ProvidersLookupTests(TempTrackTestCase):
                 })
             return _json_resp({})
 
-        with patch('track_lookup.urllib.request.urlopen', side_effect=fake_urlopen):
+        with patch('services.lookup.resolver.urllib.request.urlopen', side_effect=fake_urlopen):
             res = resolve_track_number(tr2)
         self.assertEqual(res.tracknumber, 2)
         self.assertIn('QQ音乐', res.source)
@@ -196,7 +197,7 @@ class ProvidersLookupTests(TempTrackTestCase):
                 'raw_data': {'search': {'item': {'data': {'albumOfTrack': {'date': {'isoString': '2024-02-14T00:00:00Z'}}}}}, 'download': {}},
             }, '2024-02-14'),
         ]
-        with patch('track_lookup.urllib.request.urlopen', side_effect=AssertionError('不应发起网络请求')):
+        with patch('services.lookup.resolver.urllib.request.urlopen', side_effect=AssertionError('不应发起网络请求')):
             for sub, fname, item, expected_date in cases:
                 clear_caches()
                 d = os.path.join(self.tmp, sub)
@@ -250,7 +251,7 @@ class ProvidersLookupTests(TempTrackTestCase):
                 })
             return _json_resp({})
 
-        with patch('track_lookup.urllib.request.urlopen', side_effect=fake_urlopen):
+        with patch('services.lookup.resolver.urllib.request.urlopen', side_effect=fake_urlopen):
             tr_jay = LibraryTrack(path='jay.flac', filename='七里香.flac', folder=self.tmp, title='七里香', artist='周杰伦', album='七里香', duration=299.0)
             res = resolve_track_metadata(tr_jay, need_track=True, need_date=True)
             self.assertEqual(res.tracknumber, 2)
@@ -324,7 +325,7 @@ class ProvidersLookupTests(TempTrackTestCase):
              patch.object(qq_provider, 'get_song_extra', return_value={'genre': 'Indie Pop', 'composer': ''}), \
              patch.object(itunes_provider, 'search_album', return_value=('', '', False)), \
              patch.object(mb_provider, 'search_album', return_value=('', '', False)), \
-             patch('track_lookup._search_song_and_resolve_album', return_value=None):
+             patch('services.lookup.resolver._search_song_and_resolve_album', return_value=None):
             res = resolve_track_metadata(tr, need_track=True, need_date=True, need_cover=True, need_core=True, need_extra=True)
 
         self.assertEqual(res.tracknumber, 2)
@@ -341,7 +342,7 @@ class ProvidersLookupTests(TempTrackTestCase):
         Image.new('RGB', (400, 400), (20, 140, 220)).save(png_buf, format='PNG')
         png_bytes = png_buf.getvalue()
 
-        with patch('track_lookup.urllib.request.urlopen', return_value=FakeHTTPResponse(png_bytes)) as m_open:
+        with patch('services.lookup.resolver.urllib.request.urlopen', return_value=FakeHTTPResponse(png_bytes)) as m_open:
             cov1 = fetch_cover_bytes('https://example.com/cover.png')
             cov2 = fetch_cover_bytes('https://example.com/cover.png')
         self.assertIsNotNone(cov1)
@@ -378,8 +379,8 @@ class ProvidersLookupTests(TempTrackTestCase):
             title='SongTwo', artist='SingerZ', album='OnlyNeteaseAlb',
             date='2020-12-22', genre='Pop', comment='Note', disk_discnumber='1', disk_disc_int=1, duration=200.0,
         )
-        with patch('track_lookup.urllib.request.urlopen', side_effect=fake_urlopen), \
-             patch('track_lookup.time.sleep', return_value=None):
+        with patch('services.lookup.resolver.urllib.request.urlopen', side_effect=fake_urlopen), \
+             patch('services.lookup.resolver.time.sleep', return_value=None):
             r1 = resolve_track_metadata(t1, need_track=False, need_date=False, need_cover=False, need_core=False, need_extra=True)
             r2 = resolve_track_metadata(t2, need_track=False, need_date=False, need_cover=False, need_core=False, need_extra=True)
 
@@ -400,8 +401,8 @@ class ProvidersLookupTests(TempTrackTestCase):
                 return _json_resp({'lrc': {'lyric': '[00:00.00] 作曲 : CompZ\n'}})
             return fake_urlopen(req, timeout=timeout)
 
-        with patch('track_lookup.urllib.request.urlopen', side_effect=fake_urlopen_with_comp), \
-             patch('track_lookup.time.sleep', return_value=None):
+        with patch('services.lookup.resolver.urllib.request.urlopen', side_effect=fake_urlopen_with_comp), \
+             patch('services.lookup.resolver.time.sleep', return_value=None):
             r_comp = resolve_track_metadata(t1, need_track=False, need_date=False, need_cover=False, need_core=False, need_extra=True)
         self.assertEqual(r_comp.composer, 'CompZ')
         self.assertFalse(any('qq.com' in u or 'itunes.apple.com' in u or 'musicbrainz.org' in u for u in calls))
@@ -410,8 +411,8 @@ class ProvidersLookupTests(TempTrackTestCase):
         calls.clear()
         clear_caches()
         t_miss = LibraryTrack(path='miss.flac', filename='Unknown.flac', folder=self.tmp, title='Unknown', artist='Nobody', album='NoSuchAlbum')
-        with patch('track_lookup.urllib.request.urlopen', side_effect=lambda req, timeout=8: (calls.append(req.full_url) or _json_resp({}))), \
-             patch('track_lookup.time.sleep', return_value=None):
+        with patch('services.lookup.resolver.urllib.request.urlopen', side_effect=lambda req, timeout=8: (calls.append(req.full_url) or _json_resp({}))), \
+             patch('services.lookup.resolver.time.sleep', return_value=None):
             r_miss = resolve_track_metadata(t_miss, need_track=True, need_date=True, need_cover=True, need_core=True, need_extra=True)
         self.assertEqual(r_miss.source, '')
         self.assertEqual(sum(1 for u in calls if 'musicbrainz.org/ws/2/release/' in u), 1)
@@ -428,8 +429,8 @@ class ProvidersLookupTests(TempTrackTestCase):
                 raise OSError('network down')
             return _json_resp({})
 
-        with patch('track_lookup.urllib.request.urlopen', side_effect=fail_mb), \
-             patch('track_lookup.time.sleep', return_value=None):
+        with patch('services.lookup.resolver.urllib.request.urlopen', side_effect=fail_mb), \
+             patch('services.lookup.resolver.time.sleep', return_value=None):
             for idx in range(8):
                 mb_provider.search_album(f'Alb{idx}', f'Alb{idx}', f'Art{idx}')
         self.assertEqual(mb_calls, MB_FAIL_THRESHOLD)
@@ -578,8 +579,8 @@ class ProvidersLookupTests(TempTrackTestCase):
             raise AssertionError(f'Unexpected URL in test: {url}')
 
         try:
-            with patch('track_lookup.urllib.request.urlopen', side_effect=_fake_urlopen), \
-                 patch('track_lookup.time.sleep'):
+            with patch('services.lookup.resolver.urllib.request.urlopen', side_effect=_fake_urlopen), \
+                 patch('services.lookup.resolver.time.sleep'):
                 # QQ client_search_cp 空列表 -> Desktop musicu.fcg 兜底 + 双语 Base64 歌词合并
                 tr_qq = LibraryTrack(
                     path=os.path.join(self.tmp, 'SongQQ.flac'), folder=self.tmp, filename='SongQQ.flac',
@@ -857,7 +858,7 @@ class ProvidersLookupTests(TempTrackTestCase):
             self.assertEqual(ns.spotify_client_id, 'cid1')
             self.assertEqual(ns.spotify_client_secret, 'csec1')
 
-            with patch('track_lookup.urllib.request.urlopen', side_effect=_fake_urlopen):
+            with patch('services.lookup.resolver.urllib.request.urlopen', side_effect=_fake_urlopen):
                 # 1. Deezer 专辑匹配 + LRCLIB 同步歌词跨平台聚合
                 tr_dz = LibraryTrack(
                     path=os.path.join(self.tmp, 'One More Time.flac'), folder=self.tmp, filename='One More Time.flac',
@@ -976,12 +977,12 @@ class ProvidersLookupTests(TempTrackTestCase):
                 dz_calls += 1
                 raise OSError('network unreachable')
 
-            with patch('track_lookup.urllib.request.urlopen', side_effect=_fail_deezer):
+            with patch('services.lookup.resolver.urllib.request.urlopen', side_effect=_fail_deezer):
                 for idx in range(7):
                     deezer_provider.search_album(f'DZAlb{idx}', f'DZAlb{idx}', f'DZArt{idx}')
             self.assertEqual(dz_calls, 5)
             clear_caches()
-            with patch('track_lookup.urllib.request.urlopen', side_effect=_fake_urlopen):
+            with patch('services.lookup.resolver.urllib.request.urlopen', side_effect=_fake_urlopen):
                 aid, _, _ = deezer_provider.search_album('Discovery Daft Punk', 'Discovery', 'Daft Punk')
             self.assertEqual(aid, '302127')
         finally:
@@ -1046,7 +1047,7 @@ class ProvidersLookupTests(TempTrackTestCase):
                     return FakeHTTPResponse(fanart_artist_json)
                 return FakeHTTPResponse('{}')
 
-            with patch('track_lookup.urllib.request.urlopen', side_effect=_fake_api_urlopen), \
+            with patch('services.lookup.resolver.urllib.request.urlopen', side_effect=_fake_api_urlopen), \
                  patch('providers.musicbrainz.http_get_json') as m_mb_get:
                 m_mb_get.return_value = json.loads(mb_artist_json)
 
@@ -1162,7 +1163,7 @@ class ProvidersLookupTests(TempTrackTestCase):
                     return FakeHTTPResponse(tadb_track_json)
                 return FakeHTTPResponse('{}')
 
-            with patch('track_lookup.urllib.request.urlopen', side_effect=_fake_api_urlopen):
+            with patch('services.lookup.resolver.urllib.request.urlopen', side_effect=_fake_api_urlopen):
                 # 测试 search_song_hits 单曲直搜
                 hits = tadb_provider.search_song_hits('Yellow Coldplay', title='Yellow', artist='Coldplay')
                 self.assertEqual(len(hits), 1)

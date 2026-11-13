@@ -11,7 +11,7 @@ import urllib.request
 import zlib
 from unittest.mock import MagicMock, patch
 
-from library_scan import LibraryTrack
+from core.models import LibraryTrack
 from providers import PROVIDERS
 from providers.base import (
     HTTPConnectionPool,
@@ -25,7 +25,7 @@ from providers.base import (
     http_post_json,
     reset_all_circuit_breakers,
 )
-from track_lookup import clear_caches, fetch_cover_bytes, resolve_track_metadata
+from services.lookup import clear_caches, fetch_cover_bytes, resolve_track_metadata
 
 
 class _MockHTTPHandler(http.server.BaseHTTPRequestHandler):

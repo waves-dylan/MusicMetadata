@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
-from track_lookup import (
+from services.lookup import resolver
+from services.lookup.resolver import (
+    ONLINE_PROVIDERS,
+    PRIMARY_PROVIDERS,
+    PROVIDERS,
+    PROVIDER_LABELS,
     TrackMatch,
     clear_caches,
     fetch_artist_bytes,
@@ -11,6 +16,7 @@ from track_lookup import (
     get_netease_api_base,
     get_spotify_credentials,
     get_tadb_api_key,
+    has_spotify_credentials,
     parse_source_list,
     resolve_artist_pic_url,
     resolve_release_date,
@@ -23,6 +29,10 @@ from track_lookup import (
 )
 
 __all__ = [
+    'ONLINE_PROVIDERS',
+    'PRIMARY_PROVIDERS',
+    'PROVIDERS',
+    'PROVIDER_LABELS',
     'TrackMatch',
     'clear_caches',
     'fetch_artist_bytes',
@@ -31,11 +41,13 @@ __all__ = [
     'get_netease_api_base',
     'get_spotify_credentials',
     'get_tadb_api_key',
+    'has_spotify_credentials',
     'parse_source_list',
     'resolve_artist_pic_url',
     'resolve_release_date',
     'resolve_track_metadata',
     'resolve_track_number',
+    'resolver',
     'set_fanart_keys',
     'set_netease_api_base',
     'set_spotify_credentials',

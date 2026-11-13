@@ -13,7 +13,7 @@ from contextlib import contextmanager
 
 from PIL import Image
 
-from track_lookup import clear_caches
+from services.lookup import clear_caches
 
 SAMPLE_163_KEY = (
     "163 key(Don't modify):L64FU3W4YxX3ZFTmbZ+8/eam10XVQrPtLahYtNC7enAJ9mlpBgvX0sr9GKudLNFQ"

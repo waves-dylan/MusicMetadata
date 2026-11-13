@@ -12,14 +12,15 @@ from mutagen.id3 import COMM, ID3, TALB, TIT2, TMCL, TPE1, TXXX
 from mutagen.mp3 import MP3
 from mutagen.wave import WAVE
 
-from art_repair import (
+from core.models import FoobarEnv
+from infra.integrations.foobar import scan_library
+from services.art import (
     analyze_folder_art_and_tags,
     apply_track_deletions,
     apply_track_repairs,
     inspect_deletable_fields,
     read_pictures,
 )
-from foobar_library import FoobarEnv, scan_library
 from tag_io import (
     bump_mtime,
     decode_163_key,

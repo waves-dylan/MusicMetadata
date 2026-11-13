@@ -5,7 +5,7 @@ from __future__ import annotations
 import tkinter as tk
 from tkinter import ttk
 
-from art_repair import parse_set_tags
+from services.art import parse_set_tags
 from core.constants import FIELD_LABELS, SETTABLE_FIELDS
 from core.models import LibraryTrack
 from pipelines.options import SetOptions

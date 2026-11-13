@@ -13,9 +13,21 @@ from mutagen.id3 import TPE1
 from mutagen.mp3 import MP3
 
 import app as app_mod
-from art_repair import (
+from core.constants import (
     ARTIST_MAX_SIDE,
     ARTIST_PIC_TYPE,
+    STATUS_MISSING_DISK,
+    STATUS_OK,
+    STATUS_STALE_FOOBAR,
+)
+from core.models import FoobarEnv, TrackMatch
+from infra.integrations.foobar import (
+    _parse_metadb_info,
+    parse_library_folders,
+    scan_library,
+)
+from infra.scanner import track_has_pending_work
+from services.art import (
     analyze_folder_art_and_tags,
     apply_artist_picture,
     apply_folder_artist_file,
@@ -28,19 +40,8 @@ from art_repair import (
     pick_canonical_album_date,
     read_pictures,
 )
-from foobar_library import (
-    STATUS_MISSING_DISK,
-    STATUS_OK,
-    STATUS_STALE_FOOBAR,
-    FoobarEnv,
-    _parse_metadb_info,
-    parse_library_folders,
-    scan_library,
-    track_has_pending_work,
-)
 from tag_io import _remove_file_with_retry, read_audio_info, write_tracknumber
 from tests.common import TempTrackTestCase
-from track_lookup import TrackMatch
 
 
 class ArtRepairTests(TempTrackTestCase):
@@ -469,8 +470,8 @@ class ArtRepairTests(TempTrackTestCase):
 
     def test_folder_art_plan_artist_path_property_and_runner_batch_download(self):
         from PIL import Image
-        from art_repair import FolderArtPlan
-        from runner import _download_and_apply_online_artist_pics
+        from core.models import FolderArtPlan
+        from pipelines.repair import _download_and_apply_online_artist_pics
 
         fp = FolderArtPlan(folder=self.tmp, artist_cover_path=os.path.join(self.tmp, 'artist.jpg'))
         self.assertEqual(fp.artist_path, fp.artist_cover_path)
@@ -501,7 +502,7 @@ class ArtRepairTests(TempTrackTestCase):
         matches = {p: TrackMatch(1, source='test', artist='TestSinger', artist_pic_url='http://example.com/artist.jpg')}
         opts = app_mod.FixOptions(enable_artist_art=True)
 
-        with patch('runner.resolve_hook', return_value=lambda **kw: fake_pic_bytes):
+        with patch('pipelines.repair.resolve_hook', return_value=lambda **kw: fake_pic_bytes):
             cancelled, online_artists, ok_cnt, fail_cnt = _download_and_apply_online_artist_pics(
                 [tr], [tr], matches, set(), None, lambda _m: None, lambda: False, opts,
             )

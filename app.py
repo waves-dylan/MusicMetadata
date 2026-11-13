@@ -9,25 +9,15 @@ import tkinter as tk
 from tkinter import messagebox
 
 from cli import build_arg_parser, run_cli
+from core.config import get_default_music_folders
 from core.models import FoobarEnv, LibraryTrack, TrackMatch
-from ui.dialogs import (
-    ConvertFormatDialog,
-    DeleteMetadataDialog,
-    FolderManagerDialog,
-    SetMetadataDialog,
-    SourceConfigDialog,
-)
-from art_repair import (
-    analyze_folder_art_and_tags,
-    pick_canonical_album_date,
-)
-from foobar_library import (
+from infra.integrations.foobar import (
     detect_foobar_env,
     get_running_foobar_exes,
     scan_library,
     sync_files_to_foobar,
 )
-from runner import (
+from pipelines import (
     FOLDER_COVER_LABELS,
     ConvertOptions,
     DeleteOptions,
@@ -40,10 +30,21 @@ from runner import (
     execute_set_tags,
     parse_delete_fields,
 )
-from tag_io import find_ffmpeg
-from track_lookup import (
+from services.art import (
+    analyze_folder_art_and_tags,
+    pick_canonical_album_date,
+)
+from services.lookup import (
     fetch_cover_bytes,
     resolve_track_metadata,
+)
+from tag_io import find_ffmpeg
+from ui.dialogs import (
+    ConvertFormatDialog,
+    DeleteMetadataDialog,
+    FolderManagerDialog,
+    SetMetadataDialog,
+    SourceConfigDialog,
 )
 from ui.main_window import (
     MainWindow,
@@ -53,7 +54,6 @@ from ui.main_window import (
     _format_tag_sync_cell,
     _resource_path,
 )
-from user_config import get_default_music_folders
 
 # 向后兼容导出（供外部脚本与自动化测试 patch app.<symbol> 使用）
 __all__ = [

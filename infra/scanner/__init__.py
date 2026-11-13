@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from core.models import LibraryTrack
 from infra.scanner.local_scanner import (
     _FULL_ALBUM_RE,
     _TEMP_COPY_RE,

@@ -11,45 +11,39 @@ import time
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
-from art_repair import (
+from cli import build_arg_parser, run_cli
+from core.config import (
+    get_default_music_folders,
+    has_foobar_env,
+    load_user_config,
+    normalize_folder_list,
+    reveal_in_file_manager,
+    save_user_config,
+    ui_font,
+)
+from core.constants import (
+    CORE_TEXT_FIELDS,
     DELETABLE_FIELDS,
+    EXTRA_TEXT_FIELDS,
+    FIELD_LABELS,
     LYRICS_MODES,
     MAX_SIDE,
     SETTABLE_FIELDS,
-    SUPPORTS_COVER_WRITE,
-    FolderArtPlan,
-    analyze_folder_art_and_tags,
-    apply_folder_cover_file,
-    apply_track_deletions,
-    apply_track_repairs,
-    apply_track_set_tags,
-    convert_track_format,
-    delete_folder_cover_file,
-    inspect_deletable_fields,
-    normalize_jpeg,
-    parse_set_tags,
-    pick_canonical_album_date,
-)
-from cli import build_arg_parser, run_cli
-from ui.dialogs import ConvertFormatDialog, DeleteMetadataDialog, FolderManagerDialog, SetMetadataDialog, SourceConfigDialog
-from foobar_library import (
-    CORE_TEXT_FIELDS,
-    EXTRA_TEXT_FIELDS,
-    FIELD_LABELS,
     STATUS_ERROR,
     STATUS_MISSING_DISK,
     STATUS_OK,
     STATUS_STALE_FOOBAR,
-    FoobarEnv,
-    LibraryTrack,
+    SUPPORTS_COVER_WRITE,
+)
+from core.models import FoobarEnv, FolderArtPlan, LibraryTrack
+from infra.integrations.foobar import (
     detect_foobar_env,
     get_running_foobar_exes,
     scan_library,
     sync_files_to_foobar,
-    track_has_pending_work,
 )
-from providers import ONLINE_PROVIDERS, PROVIDER_LABELS
-from runner import (
+from infra.scanner import track_has_pending_work
+from pipelines import (
     FOLDER_COVER_LABELS,
     ConvertOptions,
     DeleteOptions,
@@ -65,8 +59,21 @@ from runner import (
     execute_set_tags,
     parse_delete_fields,
 )
-from tag_io import CONVERT_TARGET_FORMATS, find_ffmpeg, has_valid_tracknumber, read_audio_info
-from track_lookup import (
+from providers import ONLINE_PROVIDERS, PROVIDER_LABELS
+from services.art import (
+    analyze_folder_art_and_tags,
+    apply_folder_cover_file,
+    apply_track_deletions,
+    apply_track_repairs,
+    apply_track_set_tags,
+    convert_track_format,
+    delete_folder_cover_file,
+    inspect_deletable_fields,
+    normalize_jpeg,
+    parse_set_tags,
+    pick_canonical_album_date,
+)
+from services.lookup import (
     TrackMatch,
     clear_caches,
     fetch_cover_bytes,
@@ -81,15 +88,8 @@ from track_lookup import (
     set_spotify_credentials,
     set_tadb_api_key,
 )
-from user_config import (
-    get_default_music_folders,
-    has_foobar_env,
-    load_user_config,
-    normalize_folder_list,
-    reveal_in_file_manager,
-    save_user_config,
-    ui_font,
-)
+from tag_io import CONVERT_TARGET_FORMATS, find_ffmpeg, has_valid_tracknumber, read_audio_info
+from ui.dialogs import ConvertFormatDialog, DeleteMetadataDialog, FolderManagerDialog, SetMetadataDialog, SourceConfigDialog
 
 
 

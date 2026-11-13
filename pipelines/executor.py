@@ -5,11 +5,11 @@ from __future__ import annotations
 import sys
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 
+from core.config import has_foobar_env
 from core.models import FoobarEnv
-from foobar_library import sync_files_to_foobar
+from infra.integrations.foobar import sync_files_to_foobar
+from services.lookup import fetch_artist_bytes, fetch_cover_bytes, resolve_track_metadata
 from tag_io import find_ffmpeg
-from track_lookup import fetch_artist_bytes, fetch_cover_bytes, resolve_track_metadata
-from user_config import has_foobar_env
 
 _ORIG_HOOKS = {
     'resolve_track_metadata': resolve_track_metadata,

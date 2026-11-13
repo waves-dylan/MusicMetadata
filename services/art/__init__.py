@@ -2,6 +2,28 @@
 
 from __future__ import annotations
 
+from core.constants import (
+    ARTIST_JPEG_QUALITY,
+    ARTIST_MAX_BYTES,
+    ARTIST_MAX_SIDE,
+    ARTIST_NAMES,
+    ARTIST_PIC_TYPE,
+    COVER_FRONT_TYPE,
+    COVER_NAMES,
+    DELETABLE_FIELDS,
+    EMBED_MAX_SIDE,
+    HUGE_BYTES,
+    HUGE_PIXELS,
+    IMG_EXT,
+    JPEG_QUALITY,
+    LYRICS_MODES,
+    MAX_SIDE,
+    SAME_ART_DISTANCE,
+    SETTABLE_FIELDS,
+    SUPPORTS_ARTIST_WRITE,
+    SUPPORTS_COVER_WRITE,
+)
+from core.models import FolderArtPlan, TrackArtTagPlan
 from services.art.image_ops import (
     _AHASH_CACHE,
     _NORM_ARTIST_JPEG_CACHE,
@@ -31,6 +53,7 @@ from services.art.planner import (
 )
 from services.art.writer import (
     _audio_has_pictures,
+    _container_family,
     _has_comment_entries,
     apply_artist_picture,
     apply_lyrics_to_audio,
@@ -49,14 +72,37 @@ from services.art.writer import (
     normalize_set_field_name,
     parse_set_tags,
 )
+from tag_io import read_pictures
 
 __all__ = [
+    'ARTIST_JPEG_QUALITY',
+    'ARTIST_MAX_BYTES',
+    'ARTIST_MAX_SIDE',
+    'ARTIST_NAMES',
+    'ARTIST_PIC_TYPE',
+    'COVER_FRONT_TYPE',
+    'COVER_NAMES',
+    'DELETABLE_FIELDS',
+    'EMBED_MAX_SIDE',
+    'FolderArtPlan',
+    'HUGE_BYTES',
+    'HUGE_PIXELS',
+    'IMG_EXT',
+    'JPEG_QUALITY',
+    'LYRICS_MODES',
+    'MAX_SIDE',
+    'SAME_ART_DISTANCE',
+    'SETTABLE_FIELDS',
+    'SUPPORTS_ARTIST_WRITE',
+    'SUPPORTS_COVER_WRITE',
+    'TrackArtTagPlan',
     '_AHASH_CACHE',
     '_NORM_ARTIST_JPEG_CACHE',
     '_NORM_JPEG_CACHE',
     '_SNIFF_IMAGE_CACHE',
     '_audio_has_pictures',
     '_compute_majority_tags',
+    '_container_family',
     '_date_year_and_specificity',
     '_has_comment_entries',
     '_lanczos',
@@ -90,6 +136,7 @@ __all__ = [
     'pick_canonical_album_date',
     'plan_artist_picture_fix',
     'plan_picture_fix',
+    'read_pictures',
     'same_art',
     'sniff_image',
 ]

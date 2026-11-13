@@ -6,7 +6,7 @@ import tkinter as tk
 from tkinter import ttk
 
 from providers import ONLINE_PROVIDERS, PROVIDER_LABELS
-from track_lookup import parse_source_list
+from services.lookup import parse_source_list
 from ui.dialogs.base import _ModalDialog, _msgbox
 
 

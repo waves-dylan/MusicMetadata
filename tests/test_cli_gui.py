@@ -16,25 +16,23 @@ from mutagen.mp3 import MP3
 from PIL import Image
 
 import app as app_mod
-from art_repair import (
+from core.constants import (
+    STATUS_MISSING_DISK,
+    STATUS_OK,
+    STATUS_STALE_FOOBAR,
+)
+from core.models import FoobarEnv, LibraryTrack, TrackMatch
+from infra.integrations.foobar import scan_library
+from infra.scanner import track_has_pending_work
+from services.art import (
     apply_track_repairs,
     apply_track_set_tags,
     convert_track_format,
     parse_set_tags,
     read_pictures,
 )
-from foobar_library import (
-    STATUS_MISSING_DISK,
-    STATUS_OK,
-    STATUS_STALE_FOOBAR,
-    FoobarEnv,
-    LibraryTrack,
-    scan_library,
-    track_has_pending_work,
-)
 from tag_io import read_audio_info, write_lrc_file
 from tests.common import SAMPLE_163_KEY, TempTrackTestCase, offscreen_tk
-from track_lookup import TrackMatch
 
 
 class CliGuiTests(TempTrackTestCase):
@@ -960,7 +958,7 @@ class CliGuiTests(TempTrackTestCase):
         self.assertNotIn('foobar缓存待刷新', out)
 
         # 2) 未传 --folder 时应自动回落读取配置文件中保存的 custom_folders
-        from user_config import save_user_config
+        from core.config import save_user_config
         save_user_config({'custom_folders': [dir1, dir2]})
         buf2 = io.StringIO()
         with patch('cli.detect_foobar_env', return_value=FoobarEnv()), \
@@ -972,7 +970,7 @@ class CliGuiTests(TempTrackTestCase):
         self.assertIn('共扫描 2 首', buf2.getvalue())
 
     def test_cross_platform_user_config_fonts_and_reveal(self):
-        import user_config as uc
+        import core.config as uc
 
         sample = self._make_minimal_flac('reveal_me.flac')
         abs_sample = os.path.abspath(sample)
@@ -994,7 +992,7 @@ class CliGuiTests(TempTrackTestCase):
             self.assertTrue(cfg_p.endswith(os.path.join('xdg_cfg', 'MusicMetadata', 'config.json')))
 
         # reveal_in_file_manager 按平台调用正确的系统文件管理器命令
-        with patch('user_config.subprocess.Popen') as m_popen:
+        with patch('core.config.subprocess.Popen') as m_popen:
             with patch.object(uc.os, 'name', 'nt'):
                 uc.reveal_in_file_manager(sample)
                 m_popen.assert_called_with(['explorer', '/select,', os.path.normpath(abs_sample)])
@@ -1008,8 +1006,8 @@ class CliGuiTests(TempTrackTestCase):
                 m_popen.assert_called_with(['xdg-open', os.path.dirname(abs_sample)])
 
     def test_library_scan_standalone_and_foobar_compat_exports(self):
-        import foobar_library as fb_mod
-        import library_scan as ls_mod
+        import infra.integrations.foobar as fb_mod
+        import infra.scanner as ls_mod
 
         self.assertIs(ls_mod.LibraryTrack, fb_mod.LibraryTrack)
         fp = self._make_minimal_flac('standalone.flac')

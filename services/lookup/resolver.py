@@ -9,8 +9,9 @@ import re
 import time
 import urllib.request
 
-from art_repair import ARTIST_MAX_SIDE, EMBED_MAX_SIDE, normalize_artist_jpeg, normalize_jpeg, sniff_image
-from library_scan import LibraryTrack
+from core.constants import ARTIST_MAX_SIDE, EMBED_MAX_SIDE
+from core.models import LibraryTrack
+from services.art.image_ops import normalize_artist_jpeg, normalize_jpeg, sniff_image
 from providers import (
     ONLINE_PROVIDERS,
     PRIMARY_PROVIDERS,
