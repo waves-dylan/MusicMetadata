@@ -1,12 +1,17 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+from PyInstaller.utils.hooks import collect_submodules
+
+_hidden = ['PIL.Image']
+for pkg in ('core', 'infra', 'services', 'pipelines', 'ui', 'providers'):
+    _hidden.extend(collect_submodules(pkg))
 
 a = Analysis(
     ['app.py'],
     pathex=[],
     binaries=[],
     datas=[('assets/app_icon.ico', 'assets'), ('assets/app_icon.png', 'assets')],
-    hiddenimports=['PIL.Image'],
+    hiddenimports=_hidden,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

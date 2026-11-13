@@ -53,6 +53,7 @@ from providers.base import (
 )
 from providers.musicbrainz import MB_FAIL_THRESHOLD, is_mb_circuit_open
 from providers.netease import build_netease_tracks
+from providers.theaudiodb import _extract_tadb_composer
 from tests.common import FakeHTTPResponse, TempTrackTestCase, offscreen_tk
 from track_lookup import (
     _merge_match,
@@ -1101,4 +1102,109 @@ class ProvidersLookupTests(TempTrackTestCase):
         finally:
             set_tadb_api_key('')
             set_fanart_keys('', '')
+            clear_caches()
+
+    def test_theaudiodb_song_search_and_composer(self):
+        clear_caches()
+        try:
+            # 1. 验证能力集合包含 composer 和 discnumber
+            self.assertIn('composer', tadb_provider.capabilities)
+            self.assertIn('discnumber', tadb_provider.capabilities)
+
+            # 2. 验证多渠道作曲家提取算法 _extract_tadb_composer
+            # A. 歌词头部
+            self.assertEqual(
+                _extract_tadb_composer({'strTrackLyrics': '[00:00.00]作曲: Jay Chou\n[00:05.00]歌词'}),
+                'Jay Chou',
+            )
+            # B. 英文描述匹配 written by
+            self.assertEqual(
+                _extract_tadb_composer({'strDescriptionEN': '"Bohemian Rhapsody" is a song by Queen. It was written by Freddie Mercury for the album.'}),
+                'Freddie Mercury',
+            )
+            # C. 英文描述匹配 composed by
+            self.assertEqual(
+                _extract_tadb_composer({'strDescriptionEN': '"Stairway to Heaven" was composed by guitarist Jimmy Page and vocalist Robert Plant for Led Zeppelin.'}),
+                'Jimmy Page, Robert Plant',
+            )
+            # D. 古典乐 / OST 分类回退艺人作为作曲家
+            self.assertEqual(
+                _extract_tadb_composer({'strGenre': 'Classical', 'strArtist': 'Ludwig van Beethoven'}),
+                'Ludwig van Beethoven',
+            )
+            self.assertEqual(
+                _extract_tadb_composer({'strGenre': 'OST', 'strArtist': 'Hans Zimmer'}),
+                'Hans Zimmer',
+            )
+
+            # 3. 模拟 TheAudioDB searchtrack.php 与 track.php?h= 单曲直搜及额外信息提取
+            tadb_track_json = json.dumps({
+                'track': [{
+                    'idTrack': '32724184',
+                    'idAlbum': '2109615',
+                    'idArtist': '111239',
+                    'strTrack': 'Yellow',
+                    'strAlbum': 'Parachutes',
+                    'strArtist': 'Coldplay',
+                    'intCD': '1',
+                    'intDuration': '269240',
+                    'strGenre': 'Pop-Rock',
+                    'intTrackNumber': '5',
+                    'strTrackThumb': 'https://r2.theaudiodb.com/track_yellow.jpg',
+                    'strDescriptionEN': '"Yellow" is a song by Coldplay. It was written by Chris Martin, Jonny Buckland, Guy Berryman and Will Champion for Parachutes.',
+                    'strTrackLyrics': '',
+                }]
+            })
+
+            def _fake_api_urlopen(req, timeout=10):
+                url = req.full_url if hasattr(req, 'full_url') else str(req)
+                if 'theaudiodb.com' in url and ('searchtrack.php' in url or 'track.php' in url):
+                    return FakeHTTPResponse(tadb_track_json)
+                return FakeHTTPResponse('{}')
+
+            with patch('track_lookup.urllib.request.urlopen', side_effect=_fake_api_urlopen):
+                # 测试 search_song_hits 单曲直搜
+                hits = tadb_provider.search_song_hits('Yellow Coldplay', title='Yellow', artist='Coldplay')
+                self.assertEqual(len(hits), 1)
+                h = hits[0]
+                self.assertEqual(h['title'], 'Yellow')
+                self.assertEqual(h['artist'], 'Coldplay')
+                self.assertEqual(h['album_id'], '2109615')
+                self.assertEqual(h['album_name'], 'Parachutes')
+                self.assertAlmostEqual(h['duration'], 269.24, places=2)
+                self.assertEqual(h['track'], 5)
+                self.assertEqual(h['disc'], 1)
+                self.assertEqual(h['cover_url'], 'https://r2.theaudiodb.com/track_yellow.jpg')
+                self.assertEqual(h['genre'], 'Pop-Rock')
+                # 验证在单曲独立直搜中已直接合并获取到 composer
+                self.assertEqual(h['composer'], 'Chris Martin, Jonny Buckland, Guy Berryman, Will Champion')
+
+                # 测试 get_song_extra 单曲 ID 反查
+                extra = tadb_provider.get_song_extra('32724184')
+                self.assertEqual(extra['composer'], 'Chris Martin, Jonny Buckland, Guy Berryman, Will Champion')
+                self.assertEqual(extra['genre'], 'Pop-Rock')
+
+                # 4. 集成验证：通过 resolve_track_metadata 测试 TheAudioDB 单曲直搜与 composer 回填
+                track = LibraryTrack(
+                    path='test_yellow.flac',
+                    filename='05. Coldplay - Yellow.flac',
+                    folder='',
+                    title='Yellow',
+                    artist='Coldplay',
+                    album='Parachutes',
+                    duration=269.0,
+                )
+                res = resolve_track_metadata(
+                    track,
+                    need_track=True,
+                    need_date=False,
+                    need_cover=False,
+                    need_core=False,
+                    need_extra=True,
+                    prefer_sources=('tadb',),
+                )
+                self.assertIsNotNone(res)
+                self.assertEqual(res.composer, 'Chris Martin, Jonny Buckland, Guy Berryman, Will Champion')
+                self.assertEqual(res.genre, 'Pop-Rock')
+        finally:
             clear_caches()

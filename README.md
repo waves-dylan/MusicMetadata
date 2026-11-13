@@ -1,8 +1,10 @@
 # MusicMetadata 音乐元数据
 
-[![python](https://img.shields.io/badge/python-3-blue)](https://www.python.org/) [![platform](https://img.shields.io/badge/platform-Windows-blue)](https://github.com/waves-dylan/MusicMetadata) [![license](https://img.shields.io/github/license/waves-dylan/MusicMetadata)](https://github.com/waves-dylan/MusicMetadata/blob/main/LICENSE) [![stars](https://img.shields.io/github/stars/waves-dylan/MusicMetadata?style=flat&label=stars)](https://github.com/waves-dylan/MusicMetadata) [![forks](https://img.shields.io/github/forks/waves-dylan/MusicMetadata?style=flat&label=forks)](https://github.com/waves-dylan/MusicMetadata/forks) [![watchers](https://img.shields.io/github/watchers/waves-dylan/MusicMetadata?style=flat&label=watchers)](https://github.com/waves-dylan/MusicMetadata) [![downloads](https://img.shields.io/github/downloads/waves-dylan/MusicMetadata/total?style=flat&label=downloads)](https://github.com/waves-dylan/MusicMetadata/releases)
+[![python](https://img.shields.io/badge/python-3.10+-blue)](https://www.python.org/) [![platform](https://img.shields.io/badge/platform-Windows-blue)](https://github.com/waves-dylan/MusicMetadata) [![license](https://img.shields.io/github/license/waves-dylan/MusicMetadata)](https://github.com/waves-dylan/MusicMetadata/blob/main/LICENSE) [![stars](https://img.shields.io/github/stars/waves-dylan/MusicMetadata?style=flat&label=stars)](https://github.com/waves-dylan/MusicMetadata) [![forks](https://img.shields.io/github/forks/waves-dylan/MusicMetadata?style=flat&label=forks)](https://github.com/waves-dylan/MusicMetadata/forks) [![watchers](https://img.shields.io/github/watchers/waves-dylan/MusicMetadata?style=flat&label=watchers)](https://github.com/waves-dylan/MusicMetadata) [![downloads](https://img.shields.io/github/downloads/waves-dylan/MusicMetadata/total?style=flat&label=downloads)](https://github.com/waves-dylan/MusicMetadata/releases)
 
 统一集成 **本地音乐库元数据检查与批量补全**（通用适配 MusicBee、MediaMonkey、AIMP、JRiver、Strawberry、Dopamine、Fooyin、foobar2000 等管理目录，并支持 foobar2000 `metadb.sqlite` 缓存核对与热重载）、**封面与艺术家写真规范化修复**（含单专辑 `cover.jpg` / `artist.jpg` 与分组标签补全）、**海内外多平台音轨与双语歌词联网补全**、**批量手工标签设置 / 局部清除** 与 **音频格式转换** 的桌面媒体库修复工具（GUI + CLI）。
+
+---
 
 ## 目录
 
@@ -10,8 +12,11 @@
 - [支持格式与数据源](#支持格式与数据源)
 - [图形界面使用](#图形界面使用)
 - [命令行参考](#命令行参考)
+- [架构设计与分层结构](#架构设计与分层结构)
 - [源码运行、测试与打包](#源码运行测试与打包)
-- [项目结构](#项目结构)
+- [项目完整目录树](#项目完整目录树)
+
+---
 
 ## 核心能力
 
@@ -35,6 +40,8 @@
    - 支持通过弹窗或 `--set` 批量覆写标准字段或自定义标签；支持通过 `--delete` 或弹窗按类别选择性删除部分元数据（含 `artist_cover` 与 `--delete-folder-artist` 联动删除同目录 `artist.jpg`）。
    - 支持通过 `ffmpeg`（搭配 `mutagen` 封面/标签/歌词补偿校验与同名 `.lrc` 复制）安全转换音频格式。
 
+---
+
 ## 支持格式与数据源
 
 - **支持音频容器**：`.flac`、`.mp3`、`.mp2`、`.m4a`、`.mp4`、`.m4b`、`.alac`、`.ogg`、`.oga`、`.opus`、`.wav`、`.wave`、`.aiff`、`.aif`、`.aifc`、`.wma`、`.asf`、`.ape`、`.wv`。
@@ -43,7 +50,7 @@
   - **主流程数据源 (`PRIMARY_PROVIDERS`)**：`netease`（网易云音乐，支持官方接口与 `--netease-api` 自定义反代）、`qq`（QQ 音乐，支持桌面端 `musicu.fcg` 搜索兜底与双语歌词合并）、`itunes`（Apple Music / iTunes）、`mb`（MusicBrainz）。
   - **扩展国内数据源 (`EXTENDED_CN_PROVIDERS`)**：`kugou`（酷狗音乐在线搜索、专辑信息、Base64 歌词与歌手头像）、`migu`（咪咕音乐搜索与歌词）、`baidu`（千千音乐 MD5 签名搜索与歌词）。
   - **扩展国际数据源 (`EXTENDED_INTL_PROVIDERS`)**：
-    - `tadb`（TheAudioDB 开放音乐数据库，内置公开 Key 即开即用，支持专辑、曲目、流派与高清艺人写真）
+    - `tadb`（TheAudioDB 开放音乐数据库，内置公开 Key 即开即用，支持专辑、曲目、单曲独立直搜、流派、作曲者与高清艺人写真）
     - `fanart`（Fanart.tv 社区高清视觉库，内置项目 Key 即开即用，通过 MBID 直连匹配 1000px 正方形高赞艺人头像与背景）
     - `deezer`（Deezer 免 Key 公开专辑/单曲/流派与高清封面/艺人图）
     - `ytmusic`（YouTube Music 免登录 InnerTube 搜索、封面与歌词）
@@ -51,9 +58,11 @@
     - `spotify`（默认免 Key 仅用 Embed 页面读取 `.pkl` 专辑；配置 `--spotify-client-id` / `--spotify-client-secret` 或环境变量 `SPOTIFY_CLIENT_ID` / `SPOTIFY_CLIENT_SECRET` 后启用官方 Web API 搜索与 Track ID 直查）
   - **本地 `.pkl` 缓存兼容**：兼容识别来自 `kuwo`、Spotify、Apple Music、网易云、QQ、酷狗的同目录 `.pkl` 元数据缓存。
 
+---
+
 ## 图形界面使用
 
-直接双击运行 [MusicMetadata.exe](MusicMetadata.exe)（Windows 无控制台窗口版本）或运行 `python app.py`：
+直接双击运行 [MusicMetadata.exe](MusicMetadata.exe)（Windows 免安装单文件版本）或运行 `python app.py`：
 
 1. **扫描与目录管理**：
    - 点击 **「扫描媒体库」** 开始检查；点击右上角 **「选择目录...」** 或 **「管理目录...」**。
@@ -69,6 +78,8 @@
    - **「设置标签...」**：批量添加/覆写多个标准字段（`title`、`artist`、`album`、`albumartist`、`date`、`composer`、`performer`、`genre`、`tracknumber`、`discnumber`、`comment`、`lyrics`）或自定义标签名，默认保留网易云 `163 key`，支持仅预演。
    - **「删除部分元数据...」**：独立弹窗（所有类别**默认不勾选**，非预演需二次确认），可按类别批量清除内嵌封面、封面-艺术家 (`artist_cover`)、标题、艺术家、专辑艺术家、专辑、日期、作曲、表演者、流派、音轨号、碟片编号、歌词（可选是否保留外置 `.lrc`）与注释（默认保留网易云 `163 key`，支持联动删除同目录 `cover.jpg` 与 `artist.jpg`）。
    - **「格式转换...」**：调用 `ffmpeg` 批量转码为目标格式，支持“覆盖已存在目标文件”与“校验成功后删除源文件”确认开关，自动保留元数据、封面、艺术家图与外置 `.lrc`。
+
+---
 
 ## 命令行参考
 
@@ -102,6 +113,35 @@
   - 可选类别：`cover`、`artist_cover`、`title`、`artist`、`albumartist`、`album`、`date`、`composer`、`performer`、`genre`、`tracknumber`、`discnumber`、`comment`、`lyrics`
   - 可配合 `--dry-run`、`--delete-folder-cover`、`--delete-folder-artist`、`--no-delete-lrc`、`--no-protect-163`、`--no-sync`、`--include-full-album`
 
+---
+
+## 架构设计与分层结构
+
+项目采用高内聚、低耦合的分层架构体系，将过去交织在单文件中的算法、管线、网络、视图解耦，各层职责明确：
+
+1. **核心领域层 (`core/`)**
+   - `core.constants`：全局收拢音频容器定义、字段映射表、图片限制规格与状态码。
+   - `core.models`：强类型领域实体定义，包含 `LibraryTrack`、`TrackMatch`、`FoobarEnv`、`FolderArtPlan` 等。
+   - `core.config`：跨平台用户配置序列化、字体推断与资源管理器高亮揭示。
+2. **基础支撑层 (`infra/`)**
+   - `infra.net`：通用网络基础设施，包含长连接池 (`HTTPConnectionPool`)、熔断机制 (`ProviderCircuitBreaker`) 与多级缓存管理器。
+   - `infra.scanner`：本地音乐目录深度遍历与同专一致性核对引擎。
+   - `infra.integrations.foobar`：foobar2000 宿主环境发现、`metadb.sqlite` 只读缓存比对与命令行热重载集成。
+3. **领域服务层 (`services/`)**
+   - `services.art`：图片格式嗅探、感知哈希（aHash）、高质量 JPEG 规范化缩放、目录级封面与写真规划分析 (`planner`)、原子写回与格式校验 (`writer`)。
+   - `services.lookup`：多在线音源调度、候选匹配打分与元数据智能聚合服务。
+4. **业务管线层 (`pipelines/`)**
+   - `pipelines.options`：强类型参数选项模型（`FixOptions`、`DeleteOptions`、`SetOptions`、`ConvertOptions`）。
+   - `pipelines.executor`：自适应 CPU 核心数的可即时取消并发线程池调度器。
+   - `pipelines.repair` / `delete` / `set_tags` / `convert`：各业务场景的批量执行流水线。
+5. **表现层 (`ui/`)**
+   - `ui.main_window`：基于 Tkinter 的响应式现代双栏主界面 (`MainWindow`)、异步事件队列分发与单元格数据呈现。
+   - `ui.dialogs`：按业务独立划分的模态弹窗（删除确认、手工设标、格式转换、音源优先级与音乐目录管理）。
+6. **兼容门面设计 (Facade Compatibility)**
+   - 根目录下保留 `runner.py`、`art_repair.py`、`dialogs.py`、`foobar_library.py`、`library_scan.py`、`user_config.py` 作为轻量门面，对外提供 100% 导入兼容性，第三方调用与现有测试无需任何修改。
+
+---
+
 ## 源码运行、测试与打包
 
 - **运行环境**：Python 3.10+（仅依赖 [requirements.txt](requirements.txt) 中的 `mutagen>=1.47.0` 与 `Pillow>=10.0.0`，AES 解密与 HTTP 请求均使用纯 Python / 标准库实现）；如需使用格式转换功能，请安装 `ffmpeg` 并确保其位于系统 `PATH` 中。
@@ -110,55 +150,109 @@
   pip install -r requirements.txt
   python app.py
   ```
-- **运行单元测试**：
+- **运行单元测试（全量 51 项测试套件）**：
   ```bash
   python -m unittest discover -s tests -v
   ```
-- **打包单文件 EXE**（输出至 `dist/MusicMetadata.exe`，复制更新根目录 `MusicMetadata.exe` 后可清理 `dist` 与 `build` 目录）：
+- **打包单文件免安装 EXE**（自动递归依赖封包，输出并就地更新根目录 `MusicMetadata.exe`）：
   ```bash
   pip install pyinstaller
   pyinstaller --clean --noconfirm MusicMetadata.spec
   ```
 
-## 项目结构
+---
+
+## 项目完整目录树
 
 ```text
 MusicMetadata/
-├── app.py               # tkinter 主窗口 GUI 与程序总入口（含视图过滤与目录管理联动）
-├── user_config.py       # 跨平台配置持久化、系统音乐目录探测与界面辅助
-├── runner.py            # 批量修复、删除、设值与格式转换并发执行引擎
-├── dialogs.py           # 目录管理、删除元数据、手工设值、格式转换与数据源配置弹窗
-├── cli.py               # 命令行参数解析与 CLI 批量执行入口
-├── library_scan.py      # 通用本地音乐库目录扫描、LibraryTrack 模型与时间戳刷新
-├── foobar_library.py    # foobar2000 媒体库探测、metadb.sqlite 核对及兼容导出层
-├── art_repair.py        # 专辑封面/艺术家写真规范化、分组标签修复、批量设值/删除与格式转换协调
-├── tag_io.py            # 容器识别、AES-128 163 key 解密、就地极速写入/临时副本退避、LRC 与转码
-├── track_lookup.py      # 多平台查询调度、字段合并、.pkl 缓存读取与封面/艺术家图下载
-├── providers/           # 模块化在线音源插件与网络基础设施
-│   ├── __init__.py      # 数据源注册表、别名标准化与优先级编排
-│   ├── base.py          # MusicProvider 接口、HTTP 长连接池、解压缩、熔断器与多级缓存
-│   ├── netease.py       # 网易云音乐 (支持官方接口 / 自定义反代)
-│   ├── qqmusic.py       # QQ 音乐 (y.qq.com + musicu.fcg + 双语歌词)
-│   ├── itunes.py        # Apple Music / iTunes
-│   ├── musicbrainz.py   # MusicBrainz
-│   ├── kugou.py         # 酷狗音乐 (在线搜索、专辑信息、Base64 歌词与歌手头像)
-│   ├── migu.py          # 咪咕音乐
-│   ├── baidu.py         # 千千音乐
-│   ├── deezer.py        # Deezer (专辑/单曲/流派与封面/艺人图)
-│   ├── theaudiodb.py    # TheAudioDB (开放音乐库与艺人写真)
-│   ├── fanart.py        # Fanart.tv (社区高清正方形头像与背景)
-│   ├── ytmusic.py       # YouTube Music
-│   ├── lrclib.py        # LRCLIB (同步/纯文本歌词)
-│   ├── spotify.py       # Spotify (Web API + Embed 兜底)
-│   └── kuwo.py          # 酷我音乐 (.pkl 缓存解析)
-├── tests/               # 模块化离线单元测试套件
+├── core/                                # 核心领域层
+│   ├── __init__.py
+│   ├── constants.py                     # 全局常量、标签表、容器映射、图片规格
+│   ├── models.py                        # 核心业务数据实体模型 (LibraryTrack, TrackMatch 等)
+│   └── config.py                        # 用户配置持久化、系统目录定位与系统级 reveal
+│
+├── infra/                               # 基础支撑层
+│   ├── net/                             # 通用网络层
+│   │   ├── __init__.py
+│   │   ├── pool.py                      # HTTP 长连接池与流式解压
+│   │   ├── circuit_breaker.py           # 数据源自愈熔断器
+│   │   └── cache.py                     # 内存与反向专辑多级缓存
+│   ├── scanner/                         # 本地音频扫描
+│   │   ├── __init__.py
+│   │   └── local_scanner.py             # 目录遍历、全专一致性合并、mtime 探测
+│   └── integrations/                    # 外部软件集成
+│       ├── __init__.py
+│       └── foobar.py                    # foobar2000 进程探测、metadb 只读比对与刷新
+│
+├── services/                            # 领域服务层
+│   ├── art/                             # 封面与写真视觉服务
+│   │   ├── __init__.py
+│   │   ├── image_ops.py                 # 图片嗅探、JPEG 规范缩放、aHash 感知哈希
+│   │   ├── planner.py                   # 目录外置图与内嵌封面规划分析引擎
+│   │   └── writer.py                    # 音频容器原子写入、校验与转码补偿
+│   └── lookup/                          # 在线元数据聚合服务
+│       └── __init__.py
+│
+├── pipelines/                           # 业务处理流水线
+│   ├── __init__.py
+│   ├── options.py                       # 操作选项模型 (FixOptions, DeleteOptions 等)
+│   ├── executor.py                      # 可取消线程池并发调度器
+│   ├── repair.py                        # 批量元数据修复、封面/写真拉取管线
+│   ├── delete.py                        # 批量元数据局部删除管线
+│   ├── set_tags.py                      # 批量标签手工覆写管线
+│   └── convert.py                       # 音频格式转换管线
+│
+├── providers/                           # 在线音乐数据源插件
+│   ├── __init__.py                      # 音源注册表与优先级解析
+│   ├── base.py                          # 插件基类、模糊评分与文本归一化
+│   ├── netease.py                       # 网易云音乐 (支持官方接口 / 自定义反代)
+│   ├── qqmusic.py                       # QQ 音乐 (桌面端接口 + 双语歌词)
+│   ├── itunes.py                        # Apple Music / iTunes
+│   ├── musicbrainz.py                   # MusicBrainz 开放音源
+│   ├── kugou.py                         # 酷狗音乐
+│   ├── migu.py                          # 咪咕音乐
+│   ├── baidu.py                         # 千千音乐
+│   ├── deezer.py                        # Deezer 国际音源
+│   ├── theaudiodb.py                    # TheAudioDB 社区数据库
+│   ├── fanart.py                        # Fanart.tv 高清正方形视觉源
+│   ├── ytmusic.py                       # YouTube Music
+│   ├── lrclib.py                        # LRCLIB 同步歌词
+│   ├── spotify.py                       # Spotify (Web API + Embed)
+│   └── kuwo.py                          # 酷我音乐本地缓存
+│
+├── ui/                                  # 表现展示层
+│   ├── __init__.py
+│   ├── main_window.py                   # Tkinter 主窗口响应式界面与事件循环
+│   └── dialogs/                         # 独立模态业务弹窗
+│       ├── __init__.py
+│       ├── base.py                      # 弹窗基类与深色模式 message box
+│       ├── delete_dlg.py                # 局部删除勾选弹窗
+│       ├── set_dlg.py                   # 手工设标弹窗
+│       ├── convert_dlg.py               # 格式转换设置弹窗
+│       ├── source_dlg.py                # 数据源优先级与凭证弹窗
+│       └── folder_dlg.py                # 音乐目录管理器弹窗
+│
+├── tests/                               # 全面自动化单元测试套件 (51 项测试)
 │   ├── common.py
 │   ├── test_tag_io.py
 │   ├── test_art_repair.py
 │   ├── test_providers_lookup.py
 │   ├── test_cli_gui.py
 │   └── test_online_perf_optimizations.py
-├── MusicMetadata.spec   # PyInstaller 单文件打包配置
-├── MusicMetadata.exe    # Windows 单文件可执行程序
-└── requirements.txt     # 最小运行依赖清单
+│
+├── assets/                              # 静态资源 (app_icon.ico / png)
+├── app.py                               # 极简程序总入口 (GUI + CLI 统一分流)
+├── cli.py                               # 命令行参数解析引擎
+├── tag_io.py                            # 底层音频容器读写与转码支持
+├── track_lookup.py                      # 在线检索向后兼容门面
+├── runner.py                            # 执行流水线向后兼容门面
+├── art_repair.py                        # 图像修复向后兼容门面
+├── dialogs.py                           # 弹窗向后兼容门面
+├── foobar_library.py                    # foobar 媒体库向后兼容门面
+├── library_scan.py                      # 本地扫描向后兼容门面
+├── user_config.py                       # 用户配置向后兼容门面
+├── MusicMetadata.spec                   # PyInstaller 自动依赖打包配置
+├── MusicMetadata.exe                    # Windows 独立免安装单文件程序
+└── requirements.txt                     # 最小运行依赖声明
 ```

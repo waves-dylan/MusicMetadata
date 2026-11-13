@@ -402,7 +402,7 @@ def _enrich_song_credits(
         ex = netease_provider.get_song_extra(song_id)
     elif plat == 'qq' and (need_comp or need_genre or need_lrc) and song_id:
         ex = qq_provider.get_song_extra(song_id)
-    elif plat in ('kugou', 'ytmusic', 'lrclib') and (need_comp or need_lrc) and song_id:
+    elif plat in ('kugou', 'ytmusic', 'lrclib', 'tadb') and (need_comp or need_lrc) and song_id:
         ex = PROVIDERS[plat].get_song_extra(song_id, need_lyrics=need_lrc, title=title or match.title, duration=duration)
     elif plat in ('migu', 'baidu') and (need_comp or need_lrc) and lrc_url:
         ex = PROVIDERS[plat].get_lyrics_by_url(song_id, lrc_url)
@@ -414,6 +414,8 @@ def _enrich_song_credits(
                     setattr(match, k, ex[k])
         elif need_comp and not match.composer and ex.get('composer'):
             match.composer = ex['composer']
+        if not match.genre and ex.get('genre'):
+            match.genre = ex['genre']
         if need_lrc and not match.lyrics and ex.get('lyrics'):
             match.lyrics = ex['lyrics']
     return match
@@ -442,15 +444,23 @@ def _search_song_and_resolve_album(
         label = PROVIDER_LABELS.get(plat, plat)
         seen_albs: set[str] = set()
 
-        for hit in provider.search_song_hits(term):
+        try:
+            song_hits = provider.search_song_hits(term, title=title, artist=artist)
+        except TypeError:
+            song_hits = provider.search_song_hits(term)
+
+        for hit in song_hits:
             stitle, sart, sdur = hit['title'], hit['artist'], hit['duration']
             if not song_matches(stitle, sdur, sart, tc, duration, ac):
                 continue
             sid, aid, alb_name = hit['song_id'], hit['album_id'], hit['album_name']
             pub_date, cov = hit['release_date'], hit['cover_url']
 
-            if plat in ('netease', 'qq', 'itunes', 'deezer', 'ytmusic', 'spotify'):
-                cov_kw = {'cover_url': cov} if cov and plat in ('netease', 'deezer', 'ytmusic', 'spotify') else {}
+            if plat in ('netease', 'qq', 'itunes', 'deezer', 'ytmusic', 'spotify', 'tadb'):
+                cov_kw = {'cover_url': cov} if cov and plat in ('netease', 'deezer', 'ytmusic', 'spotify', 'tadb') else {}
+                extra_cand_kw = {}
+                if hit.get('composer'):
+                    extra_cand_kw['composer'] = hit['composer']
                 if aid:
                     if aid not in seen_albs and len(seen_albs) >= 3:
                         continue
@@ -459,17 +469,21 @@ def _search_song_and_resolve_album(
                     rdate = get_album_date(plat, aid) or pub_date
                     m = match_in_tracks(tracks, title, duration, sid)
                     if m and (need_track or not need_date or rdate):
-                        cand = _make_match(plat, aid, m, len(tracks), f'{label}(单曲反查)', alb_name, release_date=rdate, **cov_kw)
+                        cand = _make_match(plat, aid, m, len(tracks), f'{label}(单曲反查)', alb_name, release_date=rdate, **cov_kw, **extra_cand_kw)
                         if dummy.album or alb_name:
                             cache_resolved_album(plat, dummy.album or alb_name, dummy.artist or sart, aid, alb_name)
                         return _enrich_song_credits(cand, plat, str(m.get('id') or sid), dummy, need_extra=need_extra, need_lyrics=need_lyrics)
-                    can_fb = rdate or (plat == 'netease' and (cov or need_lyrics)) or (plat == 'qq' and need_lyrics) or (plat in ('deezer', 'ytmusic', 'spotify') and (cov or need_lyrics))
+                    can_fb = rdate or (plat == 'netease' and (cov or need_lyrics)) or (plat == 'qq' and need_lyrics) or (plat in ('deezer', 'ytmusic', 'spotify', 'tadb') and (cov or need_lyrics or hit.get('composer')))
                     if not need_track and can_fb and date_fallback is None:
-                        cand = _make_match(plat, aid, None, None, f'{label}(单曲反查)', alb_name, release_date=rdate, artist=sart, title=stitle, **cov_kw)
+                        cand = _make_match(plat, aid, None, None, f'{label}(单曲反查)', alb_name, release_date=rdate, artist=sart, title=stitle, **cov_kw, **extra_cand_kw)
                         date_fallback = _enrich_song_credits(cand, plat, sid, dummy, need_extra=need_extra, need_lyrics=need_lyrics)
-                elif not need_track and (pub_date or (plat in ('netease', 'qq', 'ytmusic') and need_lyrics) or (plat in ('deezer', 'spotify') and cov)) and date_fallback is None:
-                    extra_kw = {'genre': hit['genre'], 'cover_url': cov} if plat == 'itunes' else ({'cover_url': cov} if cov else {})
-                    cand = TrackMatch(None, source=f'{label}(单曲反查)', album_name=alb_name, release_date=pub_date, artist=sart, title=stitle, **extra_kw)
+                elif not need_track and (pub_date or (plat in ('netease', 'qq', 'ytmusic') and need_lyrics) or (plat in ('deezer', 'spotify', 'tadb') and (cov or hit.get('composer')))) and date_fallback is None:
+                    cand_kws = {'cover_url': cov} if cov else {}
+                    if hit.get('genre'):
+                        cand_kws['genre'] = hit['genre']
+                    if hit.get('composer'):
+                        cand_kws['composer'] = hit['composer']
+                    cand = TrackMatch(None, source=f'{label}(单曲反查)', album_name=alb_name, release_date=pub_date, artist=sart, title=stitle, **cand_kws)
                     date_fallback = _enrich_song_credits(cand, plat, sid, dummy, need_extra=need_extra, need_lyrics=need_lyrics)
             else:
                 if plat == 'kugou' and aid and aid not in seen_albs and len(seen_albs) < 3:
