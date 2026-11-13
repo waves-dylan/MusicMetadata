@@ -6,6 +6,7 @@ import re
 
 from providers.base import (
     MusicProvider,
+    ProviderCircuitBreaker,
     build_tracks,
     cached_album,
     cached_search,
@@ -26,11 +27,15 @@ def itunes_cover_url(url: str, size: int = 1200) -> str:
     return re.sub(r'/\d+x\d+bb\.(jpg|png)$', f'/{size}x{size}bb.jpg', s)
 
 
+_ITUNES_CB = ProviderCircuitBreaker(threshold=5)
+
+
 class ITunesProvider(MusicProvider):
     id = 'itunes'
     label = 'Apple Music/iTunes'
     capabilities = frozenset({'track', 'date', 'cover', 'title', 'artist', 'album', 'albumartist', 'genre', 'discnumber'})
     supports_album_search = True
+    circuit_breaker = _ITUNES_CB
 
     def search_album(self, term: str, album_name: str, singer: str) -> tuple[str, str, bool]:
         def _do():

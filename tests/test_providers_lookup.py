@@ -21,8 +21,11 @@ from providers import (
     TrackMatch,
     baidu_provider,
     deezer_provider,
+    fanart_provider,
+    get_fanart_keys,
     get_netease_api_base,
     get_spotify_credentials,
+    get_tadb_api_key,
     has_spotify_credentials,
     itunes_provider,
     kugou_provider,
@@ -32,9 +35,12 @@ from providers import (
     parse_source_list,
     qq_provider,
     resolve_provider_order,
+    set_fanart_keys,
     set_netease_api_base,
     set_spotify_credentials,
+    set_tadb_api_key,
     spotify_provider,
+    tadb_provider,
     ytmusic_provider,
 )
 from providers.baidu import _QIANQIAN_SECRET, sign_qianqian_params
@@ -979,4 +985,120 @@ class ProvidersLookupTests(TempTrackTestCase):
             self.assertEqual(aid, '302127')
         finally:
             set_spotify_credentials('', '')
+            clear_caches()
+
+    def test_theaudiodb_and_fanart_providers(self):
+        clear_caches()
+        try:
+            # 1. 测试 TheAudioDB 搜索与解析
+            tadb_artist_json = json.dumps({
+                'artists': [{
+                    'idArtist': '111239',
+                    'strArtist': 'Coldplay',
+                    'strArtistThumb': 'https://r2.theaudiodb.com/thumb.jpg',
+                    'strArtistFanart': 'https://r2.theaudiodb.com/fanart.jpg',
+                }]
+            })
+            tadb_album_json = json.dumps({
+                'album': [{
+                    'idAlbum': '2109615',
+                    'strAlbum': 'Parachutes',
+                    'strArtist': 'Coldplay',
+                    'strAlbumThumb': 'https://r2.theaudiodb.com/album.jpg',
+                    'intYearReleased': '2000',
+                    'strGenre': 'Pop-Rock',
+                }]
+            })
+            tadb_tracks_json = json.dumps({
+                'track': [
+                    {'strTrack': "Don't Panic", 'intTrackNumber': '1', 'intDuration': '136906'},
+                    {'strTrack': 'Shiver', 'intTrackNumber': '2', 'intDuration': '300000'},
+                ]
+            })
+
+            # 2. 测试 Fanart.tv 搜索与解析
+            mb_artist_json = json.dumps({
+                'artists': [{'id': 'cc197bad-dc9c-440d-a5b5-d52ba2e14234', 'name': 'Coldplay'}]
+            })
+            fanart_artist_json = json.dumps({
+                'name': 'Coldplay',
+                'artistthumb': [
+                    {'url': 'https://assets.fanart.tv/thumb_low.jpg', 'likes': '2'},
+                    {'url': 'https://assets.fanart.tv/thumb_high.jpg', 'likes': '15'},
+                ],
+                'artistbackground': [
+                    {'url': 'https://assets.fanart.tv/bg.jpg', 'likes': '5'},
+                ],
+            })
+
+            def _fake_api_urlopen(req, timeout=10):
+                url = req.full_url if hasattr(req, 'full_url') else str(req)
+                if 'theaudiodb.com' in url and 'search.php' in url:
+                    return FakeHTTPResponse(tadb_artist_json)
+                if 'theaudiodb.com' in url and 'searchalbum.php' in url:
+                    return FakeHTTPResponse(tadb_album_json)
+                if 'theaudiodb.com' in url and 'track.php' in url:
+                    return FakeHTTPResponse(tadb_tracks_json)
+                if 'musicbrainz.org' in url and 'artist' in url:
+                    return FakeHTTPResponse(mb_artist_json)
+                if 'fanart.tv' in url:
+                    return FakeHTTPResponse(fanart_artist_json)
+                return FakeHTTPResponse('{}')
+
+            with patch('track_lookup.urllib.request.urlopen', side_effect=_fake_api_urlopen), \
+                 patch('providers.musicbrainz.http_get_json') as m_mb_get:
+                m_mb_get.return_value = json.loads(mb_artist_json)
+
+                # TheAudioDB 艺人写真
+                tadb_pic = tadb_provider.search_artist('Coldplay')
+                self.assertEqual(tadb_pic, 'https://r2.theaudiodb.com/thumb.jpg')
+
+                # TheAudioDB 专辑与音轨
+                aid, cov, ok = tadb_provider.search_album('Parachutes Coldplay', 'Parachutes', 'Coldplay')
+                self.assertEqual(aid, '2109615')
+                self.assertEqual(cov, 'https://r2.theaudiodb.com/album.jpg')
+                self.assertTrue(ok)
+                tracks = tadb_provider.get_album_tracks(aid)
+                self.assertEqual(len(tracks), 2)
+                self.assertEqual(tracks[0]['name'], "Don't Panic")
+                self.assertEqual(tracks[0]['number'], 1)
+
+                # Fanart.tv 艺人写真（按点赞数优先）
+                fa_pic = fanart_provider.search_artist('Coldplay')
+                self.assertEqual(fa_pic, 'https://assets.fanart.tv/thumb_high.jpg')
+
+            # 3. 验证 SourceConfigDialog 支持配置并保存 TheAudioDB / Fanart.tv Keys
+            with offscreen_tk() as root:
+                dlg = SourceConfigDialog(
+                    root,
+                    prefer_sources=(),
+                    only_sources=(),
+                    skip_sources=(),
+                    netease_api='',
+                    spotify_client_id='',
+                    spotify_client_secret='',
+                    tadb_api_key='custom_tadb_key',
+                    fanart_api_key='custom_fa_key',
+                    fanart_client_key='custom_fa_client',
+                )
+                self.assertEqual(dlg.var_tadb_key.get(), 'custom_tadb_key')
+                self.assertEqual(dlg.var_fa_key.get(), 'custom_fa_key')
+                self.assertEqual(dlg.var_fa_client.get(), 'custom_fa_client')
+                dlg.var_tadb_key.set('new_tadb')
+                dlg._on_confirm()
+                self.assertEqual(dlg.result['tadb_api_key'], 'new_tadb')
+
+            # 4. 验证 CLI 参数解析
+            parser = build_arg_parser()
+            args = parser.parse_args([
+                '--tadb-api-key', 'tadb_cli_key',
+                '--fanart-api-key', 'fa_project_key',
+                '--fanart-client-key', 'fa_client_key',
+            ])
+            self.assertEqual(args.tadb_api_key, 'tadb_cli_key')
+            self.assertEqual(args.fanart_api_key, 'fa_project_key')
+            self.assertEqual(args.fanart_client_key, 'fa_client_key')
+        finally:
+            set_tadb_api_key('')
+            set_fanart_keys('', '')
             clear_caches()

@@ -124,6 +124,23 @@ class CliGuiTests(TempTrackTestCase):
             self.assertTrue(hasattr(win, 'btn_sync_only'))
             self.assertEqual(len(win.tree['columns']), 9)
 
+            # 验证 busy 模式下所有控件与选项（含艺术家图、跳过整轨、只看待处理等）均被正确置灰禁用
+            win._set_busy(True, '正在处理测试...')
+            self.assertEqual(str(win.chk_artist_art.cget('state')), 'disabled')
+            self.assertEqual(str(win.chk_skip_full.cget('state')), 'disabled')
+            self.assertEqual(str(win.chk_only_pending.cget('state')), 'disabled')
+            self.assertEqual(str(win.btn_one_click.cget('state')), 'disabled')
+            for b in win.field_buttons.values():
+                self.assertEqual(str(b.cget('state')), 'disabled')
+
+            win._set_busy(False)
+            self.assertEqual(str(win.chk_artist_art.cget('state')), 'normal')
+            self.assertEqual(str(win.chk_skip_full.cget('state')), 'normal')
+            self.assertEqual(str(win.chk_only_pending.cget('state')), 'normal')
+            self.assertEqual(str(win.btn_one_click.cget('state')), 'normal')
+            for b in win.field_buttons.values():
+                self.assertEqual(str(b.cget('state')), 'normal')
+
     def test_execute_repairs_sync_only(self):
         fp = self._make_minimal_flac(os.path.join(self.tmp, 'sync_me.flac'))
         tr = LibraryTrack(
@@ -849,3 +866,222 @@ class CliGuiTests(TempTrackTestCase):
                     self.assertTrue(dlg.result.overwrite)
                 finally:
                     dlg = None
+
+    def test_generic_mode_ui_adaptation_and_config_persistence(self):
+        dir1 = os.path.join(self.tmp, 'LibA')
+        dir2 = os.path.join(self.tmp, 'LibB')
+        os.makedirs(dir1, exist_ok=True)
+        os.makedirs(dir2, exist_ok=True)
+        fp1 = self._make_minimal_flac(os.path.join(dir1, '01 - TrackOne.flac'))
+        fl1 = FLAC(fp1)
+        fl1['TITLE'] = ['TrackOne']
+        fl1['ARTIST'] = ['GenericArtist']
+        fl1['ALBUM'] = ['GenericAlbum']
+        fl1['TRACKNUMBER'] = ['1']
+        fl1.save()
+
+        empty_env = FoobarEnv()
+        with offscreen_tk() as root:
+            with patch('app.detect_foobar_env', return_value=empty_env), \
+                 patch('app.get_default_music_folders', return_value=[dir1]):
+                win = app_mod.MainWindow(root, auto_scan=False)
+                win.btn_rescan.invoke()
+                deadline = time.monotonic() + 3.0
+                while not win._has_scanned and time.monotonic() < deadline:
+                    root.update()
+                    time.sleep(0.02)
+                root.update()
+
+                # 无 foobar 环境应自动隐藏 foobar 专属控件并使用通用表头/摘要
+                self.assertEqual(win.btn_sync_only.winfo_manager(), '')
+                self.assertEqual(win.chk_sync.winfo_manager(), '')
+                self.assertEqual(win.btn_reset_lib.winfo_manager(), '')
+                self.assertEqual(win.tree.heading('track', 'text'), '音轨号')
+                self.assertEqual(win.tree.heading('tagsync', 'text'), '标签检查')
+                self.assertNotIn('foobar待刷新', win.var_summary.get())
+                self.assertIn('系统音乐目录', win.var_env.get())
+
+                # 非 foobar 环境下更新曲目信息不应误标为 foobar 缓存过期
+                tr = win.tracks[0]
+                win._sync_track_from_info(tr, read_audio_info(fp1), synced=False)
+                self.assertFalse(tr.needs_foobar_sync)
+
+                # 模态弹窗在 has_foobar=False 时隐藏 foobar 缓存选项
+                dlg_set = app_mod.SetMetadataDialog(root, [tr], default_sync=False, has_foobar=False)
+                self.assertEqual(dlg_set.chk_sync.winfo_manager(), '')
+                dlg_set._on_cancel()
+
+                dlg_del = app_mod.DeleteMetadataDialog(root, [tr], default_sync=False, has_foobar=False)
+                self.assertEqual(dlg_del.chk_sync.winfo_manager(), '')
+                dlg_del._on_cancel()
+
+                dlg_conv = app_mod.ConvertFormatDialog(root, [tr], default_sync=False, has_foobar=False)
+                self.assertEqual(dlg_conv.chk_sync.winfo_manager(), '')
+                dlg_conv._on_cancel()
+
+                # 多目录管理弹窗持久化保存 custom_folders
+                dlg_dir = app_mod.FolderManagerDialog(root, [dir1])
+                dlg_dir._folders.append(dir2)
+                dlg_dir._refresh_list()
+                dlg_dir._on_confirm()
+                self.assertEqual(dlg_dir.result, [os.path.abspath(dir1), os.path.abspath(dir2)])
+                win.custom_folders = dlg_dir.result
+                win._save_user_state()
+
+            # 重建主窗口应自动恢复上次保存的自定义目录
+            win2 = app_mod.MainWindow(root, auto_scan=False)
+            self.assertEqual(win2.custom_folders, [os.path.abspath(dir1), os.path.abspath(dir2)])
+            self.assertIn('2 个目录', win2.var_env.get())
+
+    def test_cli_multi_folder_and_generic_fallback(self):
+        dir1 = os.path.join(self.tmp, 'CliA')
+        dir2 = os.path.join(self.tmp, 'CliB')
+        os.makedirs(dir1, exist_ok=True)
+        os.makedirs(dir2, exist_ok=True)
+        fp1 = self._make_minimal_flac(os.path.join(dir1, '01 - A.flac'))
+        fp2 = self._make_minimal_flac(os.path.join(dir2, '02 - B.flac'))
+        for idx, fp in enumerate((fp1, fp2), 1):
+            fl = FLAC(fp)
+            fl['TITLE'] = [f'Song{idx}']
+            fl['TRACKNUMBER'] = [str(idx)]
+            fl.save()
+
+        # 1) CLI 支持多次传入 --folder 扫描多个目录，且在无 foobar 时输出通用提示
+        buf = io.StringIO()
+        with patch('cli.detect_foobar_env', return_value=FoobarEnv()), \
+             patch('sys.argv', ['app.py', '--dry-run', '--folder', dir1, '--folder', dir2]), \
+             contextlib.redirect_stdout(buf):
+            with self.assertRaises(SystemExit) as cm:
+                app_mod.main()
+        self.assertEqual(cm.exception.code, 0)
+        out = buf.getvalue()
+        self.assertIn('通用本地目录模式', out)
+        self.assertIn('共扫描 2 首', out)
+        self.assertNotIn('foobar缓存待刷新', out)
+
+        # 2) 未传 --folder 时应自动回落读取配置文件中保存的 custom_folders
+        from user_config import save_user_config
+        save_user_config({'custom_folders': [dir1, dir2]})
+        buf2 = io.StringIO()
+        with patch('cli.detect_foobar_env', return_value=FoobarEnv()), \
+             patch('sys.argv', ['app.py', '--dry-run']), \
+             contextlib.redirect_stdout(buf2):
+            with self.assertRaises(SystemExit) as cm2:
+                app_mod.main()
+        self.assertEqual(cm2.exception.code, 0)
+        self.assertIn('共扫描 2 首', buf2.getvalue())
+
+    def test_cross_platform_user_config_fonts_and_reveal(self):
+        import user_config as uc
+
+        sample = self._make_minimal_flac('reveal_me.flac')
+        abs_sample = os.path.abspath(sample)
+
+        # ui_font 在 Windows 与非 Windows 下的常规/加粗/等宽字体回落
+        with patch.object(uc.os, 'name', 'nt'):
+            self.assertEqual(uc.ui_font(9), ('Microsoft YaHei UI', 9))
+            self.assertEqual(uc.ui_font(9, bold=True), ('Microsoft YaHei UI', 9, 'bold'))
+            self.assertEqual(uc.ui_font(9, mono=True), ('Consolas', 9))
+        with patch.object(uc.os, 'name', 'posix'):
+            self.assertEqual(uc.ui_font(9), ('TkDefaultFont', 9))
+            self.assertEqual(uc.ui_font(10, bold=True), ('TkDefaultFont', 10, 'bold'))
+            self.assertEqual(uc.ui_font(9, mono=True), ('TkFixedFont', 9))
+
+        # get_config_path 在非 Windows 未设置 MUSICMETADATA_CONFIG 时使用 XDG_CONFIG_HOME
+        with patch.dict(os.environ, {'MUSICMETADATA_CONFIG': '', 'XDG_CONFIG_HOME': '/tmp/xdg_cfg'}, clear=False), \
+             patch.object(uc.os, 'name', 'posix'):
+            cfg_p = uc.get_config_path()
+            self.assertTrue(cfg_p.endswith(os.path.join('xdg_cfg', 'MusicMetadata', 'config.json')))
+
+        # reveal_in_file_manager 按平台调用正确的系统文件管理器命令
+        with patch('user_config.subprocess.Popen') as m_popen:
+            with patch.object(uc.os, 'name', 'nt'):
+                uc.reveal_in_file_manager(sample)
+                m_popen.assert_called_with(['explorer', '/select,', os.path.normpath(abs_sample)])
+
+            with patch.object(uc.os, 'name', 'posix'), patch.object(uc.sys, 'platform', 'darwin'):
+                uc.reveal_in_file_manager(sample)
+                m_popen.assert_called_with(['open', '-R', abs_sample])
+
+            with patch.object(uc.os, 'name', 'posix'), patch.object(uc.sys, 'platform', 'linux'):
+                uc.reveal_in_file_manager(sample)
+                m_popen.assert_called_with(['xdg-open', os.path.dirname(abs_sample)])
+
+    def test_library_scan_standalone_and_foobar_compat_exports(self):
+        import foobar_library as fb_mod
+        import library_scan as ls_mod
+
+        self.assertIs(ls_mod.LibraryTrack, fb_mod.LibraryTrack)
+        fp = self._make_minimal_flac('standalone.flac')
+        fl = FLAC(fp)
+        fl['TITLE'] = ['Standalone']
+        fl['TRACKNUMBER'] = ['1']
+        fl.save()
+
+        tracks = ls_mod.scan_library(folders=[self.tmp], include_art_scan=False)
+        self.assertEqual(len(tracks), 1)
+        self.assertEqual(tracks[0].title, 'Standalone')
+        self.assertFalse(tracks[0].needs_foobar_sync)
+        self.assertEqual(ls_mod.touch_files_mtime([fp]), 1)
+
+    def test_cli_artist_art_arguments_and_parser(self):
+        from cli import build_arg_parser, parse_delete_fields
+
+        parser = build_arg_parser()
+        # 默认不传为 False
+        args_default = parser.parse_args([])
+        self.assertFalse(args_default.artist_art)
+        self.assertFalse(args_default.no_artist_art)
+        self.assertFalse(args_default.delete_folder_artist)
+
+        # --artist-art
+        args_on = parser.parse_args(['--artist-art'])
+        self.assertTrue(args_on.artist_art)
+        self.assertFalse(args_on.no_artist_art)
+
+        # --no-artist-art
+        args_off = parser.parse_args(['--no-artist-art'])
+        self.assertFalse(args_off.artist_art)
+        self.assertTrue(args_off.no_artist_art)
+
+        # --delete artist_cover --delete-folder-artist
+        args_del = parser.parse_args(['--delete', 'artist_cover', '--delete-folder-artist'])
+        self.assertTrue(args_del.delete_folder_artist)
+        fields, err = parse_delete_fields(args_del.delete)
+        self.assertEqual(err, [])
+        self.assertIn('artist_cover', fields)
+
+    def test_delete_metadata_dialog_artist_cover_and_folder_artist(self):
+        with offscreen_tk() as root:
+            tr = LibraryTrack(path=os.path.join(self.tmp, 'test.flac'), filename='test.flac', folder=self.tmp)
+            dlg = app_mod.DeleteMetadataDialog(root, [tr])
+            self.assertIn('artist_cover', dlg.field_vars)
+            self.assertTrue(hasattr(dlg, 'chk_delete_folder_artist'))
+            self.assertEqual(str(dlg.chk_delete_folder_artist.cget('state')), 'disabled')
+
+            # 勾选 artist_cover 后激活外置 artist.jpg 复选框
+            dlg.field_vars['artist_cover'].set(True)
+            dlg._on_artist_cover_toggled()
+            self.assertEqual(str(dlg.chk_delete_folder_artist.cget('state')), 'normal')
+
+            dlg.var_delete_folder_artist.set(True)
+            dlg.var_dry_run.set(True)
+            dlg._on_confirm()
+            self.assertIsNotNone(dlg.result)
+            self.assertIn('artist_cover', dlg.result.fields)
+            self.assertTrue(dlg.result.delete_folder_artist)
+
+    def test_gui_artist_art_checkbox_and_options(self):
+        with offscreen_tk() as root:
+            win = app_mod.MainWindow(root, auto_scan=False)
+            self.assertTrue(hasattr(win, 'chk_artist_art'))
+            self.assertTrue(hasattr(win, 'var_artist_art'))
+            # 默认不勾选
+            self.assertFalse(win.var_artist_art.get())
+            opts_def = win._current_options()
+            self.assertFalse(opts_def.enable_artist_art)
+
+            # 勾选后 options 包含 enable_artist_art=True
+            win.var_artist_art.set(True)
+            opts_on = win._current_options()
+            self.assertTrue(opts_on.enable_artist_art)

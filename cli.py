@@ -23,6 +23,7 @@ from runner import (
 )
 from tag_io import CONVERT_TARGET_FORMATS, find_ffmpeg
 from track_lookup import parse_source_list
+from user_config import get_default_music_folders, has_foobar_env, load_user_config, normalize_folder_list
 
 _ORIG_CLI_HOOKS = {
     'detect_foobar_env': detect_foobar_env,
@@ -44,11 +45,32 @@ def _cli_hook(name: str, current):
     return current
 
 
+def _resolve_cli_folders(raw_folder) -> list[str] | None:
+    if isinstance(raw_folder, (list, tuple)):
+        folders = normalize_folder_list(raw_folder)
+    elif raw_folder:
+        folders = normalize_folder_list([raw_folder])
+    else:
+        folders = []
+    return folders or None
+
+
 def _prepare_cli_scan(args, *, include_art_scan: bool, show_unavailable: bool = False):
     env = _cli_hook('detect_foobar_env', detect_foobar_env)()
-    custom = [os.path.abspath(args.folder)] if args.folder else None
-    print('foobar 目录:', env.fb_dir or '未检测到')
-    print('媒体库目录:', custom or env.library_folders)
+    custom = _resolve_cli_folders(getattr(args, 'folder', None))
+    is_fb = has_foobar_env(env)
+    if custom is None and not env.library_folders:
+        cfg_folders = normalize_folder_list(load_user_config().get('custom_folders'), existing_only=True)
+        custom = cfg_folders or get_default_music_folders() or None
+
+    if is_fb:
+        print('foobar 目录:', env.fb_dir or '未检测到')
+        print('媒体库目录:', custom or env.library_folders)
+    else:
+        print('扫描模式: 通用本地目录模式（未检测到 foobar2000）')
+        print('扫描目录:', custom or [])
+        if not custom:
+            print('提示: 未找到已保存目录或系统音乐目录，请通过 --folder 指定要扫描的文件夹。')
     if show_unavailable and not custom and env.unavailable_folders:
         print('不可访问的媒体库目录:', env.unavailable_folders)
     tracks = _cli_hook('scan_library', scan_library)(env, folders=custom, include_art_scan=include_art_scan)
@@ -127,12 +149,18 @@ def _run_delete_cli(args) -> int:
     if getattr(args, 'delete_folder_cover', False) and 'cover' not in del_fields:
         print('--delete-folder-cover 需与 --delete cover 配合使用。', file=sys.stderr)
         return 2
+    if getattr(args, 'delete_folder_artist', False) and 'artist_cover' not in del_fields:
+        print('--delete-folder-artist 需与 --delete artist_cover 配合使用。', file=sys.stderr)
+        return 2
 
-    env, tracks, skip_full = _prepare_cli_scan(args, include_art_scan=('cover' in del_fields), show_unavailable=True)
+    env, tracks, skip_full = _prepare_cli_scan(
+        args, include_art_scan=('cover' in del_fields or 'artist_cover' in del_fields), show_unavailable=True,
+    )
     targets = _active_targets(tracks, skip_full)
     del_opts = DeleteOptions(
         fields=frozenset(del_fields),
         delete_folder_cover=bool(getattr(args, 'delete_folder_cover', False)),
+        delete_folder_artist=bool(getattr(args, 'delete_folder_artist', False)),
         delete_lrc_file=not getattr(args, 'no_delete_lrc', False),
         protect_163_key=not getattr(args, 'no_protect_163', False),
         enable_sync=not args.no_sync,
@@ -168,10 +196,14 @@ def run_cli(args) -> int:
 
     lyrics_mode = 'lrc' if getattr(args, 'external_lrc', False) else (getattr(args, 'lyrics_mode', 'auto') or 'auto')
     enable_lyrics = bool((getattr(args, 'lyrics', False) or getattr(args, 'external_lrc', False)) and not getattr(args, 'no_lyrics', False))
+    enable_artist_art = bool(getattr(args, 'artist_art', False) and not getattr(args, 'no_artist_art', False))
 
-    env, tracks, skip_full = _prepare_cli_scan(args, include_art_scan=(not args.no_art or not args.no_tags), show_unavailable=True)
+    env, tracks, skip_full = _prepare_cli_scan(
+        args, include_art_scan=(not args.no_art or not args.no_tags or enable_artist_art), show_unavailable=True,
+    )
     opts = FixOptions(
         enable_track=not args.no_track, enable_art=not args.no_art,
+        enable_artist_art=enable_artist_art,
         enable_tags=not args.no_tags, enable_extra_tags=not args.no_extra_tags,
         enable_date=not args.no_date, enable_albumartist=not args.no_albumartist,
         enable_artist=not args.no_artist, enable_composer=not args.no_composer,
@@ -181,6 +213,9 @@ def run_cli(args) -> int:
         netease_api=(getattr(args, 'netease_api', '') or '').strip() or None,
         spotify_client_id=(getattr(args, 'spotify_client_id', None) or None),
         spotify_client_secret=(getattr(args, 'spotify_client_secret', None) or None),
+        tadb_api_key=(getattr(args, 'tadb_api_key', None) or None),
+        fanart_api_key=(getattr(args, 'fanart_api_key', None) or None),
+        fanart_client_key=(getattr(args, 'fanart_client_key', None) or None),
         enable_sync=not args.no_sync, sync_only=args.sync_only, dry_run=args.dry_run,
     )
     if opts.enable_tags and not any((opts.enable_date, opts.enable_albumartist, opts.enable_artist, opts.enable_composer, opts.enable_genre, opts.enable_disc)):
@@ -196,29 +231,39 @@ def run_cli(args) -> int:
             and not (skip_full and t.is_full_album) and not t.is_temp_duplicate)
     )
     lrc_part = f'，缺歌词 {sum(1 for t in targets if t.needs_lyrics)}' if enable_lyrics else ''
+    art_part = f'，缺艺术家图 {sum(1 for t in targets if t.needs_artist_art)}' if enable_artist_art else ''
+    stale_cnt = sum(1 for t in targets if t.needs_foobar_sync)
+    fb_part = f'，foobar缓存待刷新 {stale_cnt}' if (has_foobar_env(env) or stale_cnt > 0) else ''
     print(
         f'共扫描 {len(tracks)} 首，待处理 {len(targets)} 首（缺音轨 {sum(1 for t in targets if t.needs_tracknumber)}，'
         f'封面待修 {sum(1 for t in targets if t.needs_cover_fix)} / 目录cover {len({t.folder for t in targets if t.folder_cover_action in ("create", "rewrite", "remove")})}，'
-        f'标签待补 {tagc} [缺日期 {datec}]{lrc_part}，foobar缓存待刷新 {sum(1 for t in targets if t.needs_foobar_sync)}）。'
+        f'标签待补 {tagc} [缺日期 {datec}]{lrc_part}{art_part}{fb_part}）。'
     )
     if not targets:
-        print('媒体库曲目元数据、封面与 foobar 缓存均正常。')
+        print('媒体库曲目元数据、封面与 foobar 缓存均正常。' if has_foobar_env(env) else '扫描目录曲目元数据与封面均正常。')
         return 0
     s = _cli_hook('execute_repairs', execute_repairs)(env, targets, opts, log_cb=print)
     prefix = '[预演] 完成：预计写入' if args.dry_run else '完成：文件写入'
     lrc_done = f" / 歌词 {s['lyrics_fixed']}" if s.get('lyrics_fixed') else ''
     lrc_miss = f"，未匹配歌词 {s['lyrics_unmatched']}" if s.get('lyrics_unmatched') else ''
-    print(f"{prefix} {s['written_ok']}（标签 {s['tags_fixed']} / 日期 {s.get('date_fixed', 0)}{lrc_done}），目录cover {s['folder_cover_ok']}，纯缓存同步 {s['synced_stale']}，未匹配音轨 {s['unmatched']}，未匹配日期 {s.get('date_unmatched', 0)}{lrc_miss}，失败 {s['written_fail'] + s['folder_cover_fail']}。")
-    return 0 if (s['written_fail'] + s['folder_cover_fail']) == 0 else 1
+    art_done = f" / 艺术家图 {s['artist_fixed']}" if s.get('artist_fixed') else ''
+    fa_done = f"，目录artist {s['folder_artist_ok']}" if s.get('folder_artist_ok') else ''
+    print(f"{prefix} {s['written_ok']}（标签 {s['tags_fixed']} / 日期 {s.get('date_fixed', 0)}{lrc_done}{art_done}），目录cover {s['folder_cover_ok']}{fa_done}，纯缓存同步 {s['synced_stale']}，未匹配音轨 {s['unmatched']}，未匹配日期 {s.get('date_unmatched', 0)}{lrc_miss}，失败 {s['written_fail'] + s['folder_cover_fail'] + s.get('folder_artist_fail', 0)}。")
+    return 0 if (s['written_fail'] + s['folder_cover_fail'] + s.get('folder_artist_fail', 0)) == 0 else 1
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog='MusicMetadata', description='MusicMetadata — foobar2000 媒体库曲目元数据修复工具')
+    parser = argparse.ArgumentParser(
+        prog='MusicMetadata',
+        description='MusicMetadata — 通用本地音乐库元数据修复工具（支持 MusicBee/Fooyin/Strawberry/AIMP/foobar2000 等）',
+    )
     parser.add_argument('--auto', action='store_true', help='无界面自动扫描并执行修复')
     parser.add_argument('--dry-run', action='store_true', help='只扫描和预览待修复项目，不修改文件')
     parser.add_argument('--sync-only', action='store_true', help='仅检查并刷新 foobar 元数据缓存')
     parser.add_argument('--no-track', action='store_true', help='跳过音轨号补全')
     parser.add_argument('--no-art', action='store_true', help='跳过封面与目录 cover.jpg 修复')
+    parser.add_argument('--artist-art', action='store_true', help='联网获取艺术家图片（头像/写真），内嵌至音频并生成目录 artist.jpg（默认关闭）')
+    parser.add_argument('--no-artist-art', action='store_true', help='跳过艺术家图片补全')
     parser.add_argument('--no-tags', action='store_true', help='跳过全部文本标签与碟片编号补全')
     parser.add_argument('--no-extra-tags', action='store_true', help='跳过扩展标签（作曲/流派/碟片编号）补全')
     parser.add_argument('--no-date', action='store_true', help='跳过日期(date)补全')
@@ -237,7 +282,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument('--netease-api', default='', help='自定义网易云音乐 API 地址（留空使用官方接口）')
     parser.add_argument('--spotify-client-id', default='', help='可选 Spotify Web API Client ID（也可通过环境变量 SPOTIFY_CLIENT_ID 设置）')
     parser.add_argument('--spotify-client-secret', default='', help='可选 Spotify Web API Client Secret（也可通过环境变量 SPOTIFY_CLIENT_SECRET 设置）')
-    parser.add_argument('--no-sync', action='store_true', help='跳过 foobar 缓存刷新')
+    parser.add_argument('--tadb-api-key', default='', help='可选 TheAudioDB API Key（留空使用公共 Key）')
+    parser.add_argument('--fanart-api-key', default='', help='可选 Fanart.tv Project API Key（留空使用内置 Project Key）')
+    parser.add_argument('--fanart-client-key', default='', help='可选 Fanart.tv Personal/Client Key（加速缓存刷新）')
+    parser.add_argument('--no-sync', action='store_true', help='跳过写入后时间戳推进与 foobar 缓存刷新')
     parser.add_argument(
         '--set', dest='set_tags', action='append', default=[], metavar='KEY=VALUE',
         help='手工设置指定或自定义元数据标签（可多次传入，如 --set genre=Pop --set date=2024）',
@@ -253,8 +301,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help='删除指定元数据类别（逗号分隔或多次传入，如 --delete composer,performer,lyrics）；可选: ' + ','.join(DELETABLE_FIELDS),
     )
     parser.add_argument('--delete-folder-cover', action='store_true', help='删除封面时同时删除同目录外置 cover.jpg')
+    parser.add_argument('--delete-folder-artist', action='store_true', help='删除封面-艺术家时同时删除同目录外置 artist.jpg')
     parser.add_argument('--no-delete-lrc', action='store_true', help='删除歌词时不删除同名外置 .lrc 文件')
     parser.add_argument('--no-protect-163', action='store_true', help='删除注释时一并删除网易云 163 key（默认保留）')
-    parser.add_argument('--folder', default='', help='指定扫描目录')
+    parser.add_argument('--folder', action='append', default=[], help='指定扫描目录（可多次传入以扫描多个目录）')
     parser.add_argument('--include-full-album', action='store_true', help='也尝试处理整轨全长文件')
     return parser

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import os
 import sqlite3
 import struct
@@ -13,9 +14,17 @@ from mutagen.mp3 import MP3
 
 import app as app_mod
 from art_repair import (
+    ARTIST_MAX_SIDE,
+    ARTIST_PIC_TYPE,
     analyze_folder_art_and_tags,
+    apply_artist_picture,
+    apply_folder_artist_file,
     apply_folder_cover_file,
+    apply_single_front_cover,
     apply_track_repairs,
+    delete_artist_pictures_from_audio,
+    delete_folder_artist_file,
+    normalize_artist_jpeg,
     pick_canonical_album_date,
     read_pictures,
 )
@@ -347,3 +356,155 @@ class ArtRepairTests(TempTrackTestCase):
         self.assertEqual(s['date_fixed'], 3)
         for p in paths:
             self.assertEqual(read_audio_info(p)['date'], '2024-04-05')
+
+    def test_artist_art_coexistence_and_deletion(self):
+        # 1) FLAC: 封面 (Type 3) 与 艺术家图 (Type 8) 共存与无损删除
+        flac_p = self._make_minimal_flac('flac_artist_test.flac')
+        c_bytes = self._make_jpeg_bytes(300, 300, (255, 0, 0))
+        a_bytes = self._make_jpeg_bytes(400, 400, (0, 255, 0))
+
+        audio_flac = FLAC(flac_p)
+        self.assertTrue(apply_single_front_cover(audio_flac, 'flac', c_bytes))
+        audio_flac.save()
+
+        audio_flac = FLAC(flac_p)
+        pics = read_pictures(audio_flac, 'flac')
+        self.assertEqual(len(pics), 1)
+        self.assertEqual(pics[0]['type'], 3)
+
+        self.assertTrue(apply_artist_picture(audio_flac, 'flac', a_bytes))
+        audio_flac.save()
+
+        audio_flac = FLAC(flac_p)
+        pics = read_pictures(audio_flac, 'flac')
+        self.assertEqual(len(pics), 2)
+        types = {p['type'] for p in pics}
+        self.assertEqual(types, {3, ARTIST_PIC_TYPE})
+
+        self.assertTrue(delete_artist_pictures_from_audio(audio_flac, 'flac'))
+        audio_flac.save()
+
+        audio_flac = FLAC(flac_p)
+        pics = read_pictures(audio_flac, 'flac')
+        self.assertEqual(len(pics), 1)
+        self.assertEqual(pics[0]['type'], 3)
+
+        # 2) MP3: APIC 封面与艺术家图共存与无损删除
+        mp3_p = self._make_minimal_mp3('mp3_artist_test.mp3')
+        audio_mp3 = MP3(mp3_p)
+        self.assertTrue(apply_single_front_cover(audio_mp3, 'mp3', c_bytes))
+        audio_mp3.save()
+
+        audio_mp3 = MP3(mp3_p)
+        pics = read_pictures(audio_mp3, 'mp3')
+        self.assertEqual(len(pics), 1)
+        self.assertEqual(pics[0]['type'], 3)
+
+        self.assertTrue(apply_artist_picture(audio_mp3, 'mp3', a_bytes))
+        audio_mp3.save()
+
+        audio_mp3 = MP3(mp3_p)
+        pics = read_pictures(audio_mp3, 'mp3')
+        self.assertEqual(len(pics), 2)
+        types = {p['type'] for p in pics}
+        self.assertEqual(types, {3, ARTIST_PIC_TYPE})
+
+        self.assertTrue(delete_artist_pictures_from_audio(audio_mp3, 'mp3'))
+        audio_mp3.save()
+
+        audio_mp3 = MP3(mp3_p)
+        pics = read_pictures(audio_mp3, 'mp3')
+        self.assertEqual(len(pics), 1)
+        self.assertEqual(pics[0]['type'], 3)
+
+    def test_normalize_artist_jpeg(self):
+        from PIL import Image
+        import io
+
+        big_bytes = self._make_jpeg_bytes(1600, 1200, (30, 90, 150))
+        # 默认最大边不超过 1000px，质量 100，体积在 50~200KB 范围
+        norm = normalize_artist_jpeg(big_bytes)
+        self.assertIsNotNone(norm)
+        im = Image.open(io.BytesIO(norm))
+        self.assertLessEqual(max(im.size), 1000)
+        self.assertEqual(im.format, 'JPEG')
+        self.assertLessEqual(len(norm), 200 * 1024)
+
+        # 显式指定 max_side 仍可正常回退
+        norm_800 = normalize_artist_jpeg(big_bytes, max_side=800)
+        self.assertIsNotNone(norm_800)
+        im_800 = Image.open(io.BytesIO(norm_800))
+        self.assertLessEqual(max(im.size), 1000)
+        self.assertLessEqual(max(im_800.size), 800)
+        self.assertLessEqual(len(norm_800), 200 * 1024)
+
+    def test_single_album_folder_artist_file_plan_and_apply(self):
+        from PIL import Image
+
+        alb_dir = os.path.join(self.tmp, 'FolderArtistAlb')
+        os.makedirs(alb_dir, exist_ok=True)
+        with open(os.path.join(alb_dir, 'artist.png'), 'wb') as fp:
+            Image.new('RGB', (1000, 1000), (50, 100, 150)).save(fp, 'PNG')
+
+        p = self._make_minimal_flac(os.path.join(alb_dir, '01.flac'))
+        a = FLAC(p)
+        a['TITLE'] = ['Track 1']
+        a['ARTIST'] = ['Singer']
+        a['ALBUM'] = ['FolderArtistAlb']
+        a['TRACKNUMBER'] = ['1']
+        a.save()
+
+        plan = analyze_folder_art_and_tags(alb_dir, [p])
+        self.assertIn(plan.artist_cover_action, ('create', 'rewrite'))
+        self.assertIsNotNone(plan.artist_cover_jpeg)
+
+        ok, msg = apply_folder_artist_file(plan)
+        self.assertTrue(ok, msg)
+        art_file = os.path.join(alb_dir, 'artist.jpg')
+        self.assertTrue(os.path.isfile(art_file))
+
+        ok_del, msg_del = delete_folder_artist_file(alb_dir)
+        self.assertTrue(ok_del, msg_del)
+        self.assertFalse(os.path.isfile(art_file))
+
+    def test_folder_art_plan_artist_path_property_and_runner_batch_download(self):
+        from PIL import Image
+        from art_repair import FolderArtPlan
+        from runner import _download_and_apply_online_artist_pics
+
+        fp = FolderArtPlan(folder=self.tmp, artist_cover_path=os.path.join(self.tmp, 'artist.jpg'))
+        self.assertEqual(fp.artist_path, fp.artist_cover_path)
+        fp.artist_path = os.path.join(self.tmp, 'custom_artist.jpg')
+        self.assertEqual(fp.artist_cover_path, os.path.join(self.tmp, 'custom_artist.jpg'))
+
+        # 测试 runner 中 seen_nodata 写回目录 artist.jpg 不再抛出 AttributeError
+        alb_dir = os.path.join(self.tmp, 'OnlineArtistAlb')
+        os.makedirs(alb_dir, exist_ok=True)
+        img_buf = io.BytesIO()
+        Image.new('RGB', (400, 400), (80, 120, 160)).save(img_buf, 'JPEG')
+        fake_pic_bytes = img_buf.getvalue()
+
+        fp2 = FolderArtPlan(
+            folder=alb_dir,
+            artist_cover_action='nodata',
+            artist_cover_path=os.path.join(alb_dir, 'artist.jpg'),
+        )
+        p = self._make_minimal_flac(os.path.join(alb_dir, '01.flac'))
+        tr = app_mod.LibraryTrack(
+            path=p,
+            filename='01.flac',
+            folder=alb_dir,
+            artist='TestSinger',
+            needs_artist_art=True,
+            folder_plan=fp2,
+        )
+        matches = {p: TrackMatch(1, source='test', artist='TestSinger', artist_pic_url='http://example.com/artist.jpg')}
+        opts = app_mod.FixOptions(enable_artist_art=True)
+
+        with patch('runner.resolve_hook', return_value=lambda **kw: fake_pic_bytes):
+            cancelled, online_artists, ok_cnt, fail_cnt = _download_and_apply_online_artist_pics(
+                [tr], [tr], matches, set(), None, lambda _m: None, lambda: False, opts,
+            )
+        self.assertFalse(cancelled)
+        self.assertEqual(ok_cnt, 1)
+        self.assertTrue(os.path.isfile(os.path.join(alb_dir, 'artist.jpg')))

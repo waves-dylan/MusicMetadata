@@ -7,10 +7,12 @@ from providers.base import (
     ProviderCircuitBreaker,
     build_tracks,
     cached_album,
+    cached_artist_url,
     cached_search,
     cached_song_search,
     choose_album_detail,
     http_get_json,
+    norm_core,
     normalize_release_date,
     set_album_meta,
     to_seconds,
@@ -42,11 +44,22 @@ def _pick_deezer_cover(obj: dict) -> str:
     return ''
 
 
+def _pick_deezer_artist_pic(obj: dict) -> str:
+    if not isinstance(obj, dict):
+        return ''
+    for k in ('picture_xl', 'picture_big', 'picture_medium', 'picture'):
+        val = str(obj.get(k) or '').strip()
+        if val.startswith('http'):
+            return val
+    return ''
+
+
 class DeezerProvider(MusicProvider):
     id = 'deezer'
     label = 'Deezer'
     capabilities = frozenset({'track', 'date', 'cover', 'title', 'artist', 'album', 'albumartist', 'genre', 'discnumber'})
     supports_album_search = True
+    circuit_breaker = _DEEZER_CB
 
     def search_album(self, term: str, album_name: str, singer: str) -> tuple[str, str, bool]:
         def _do():
@@ -126,6 +139,31 @@ class DeezerProvider(MusicProvider):
             return [x for x in rows if isinstance(x, dict)]
 
         return cached_song_search('deezer_song', 'default', term, _fetch)
+
+    def search_artist(self, artist_name: str) -> str:
+        name = str(artist_name or '').strip()
+        if not name:
+            return ''
+
+        def _fetch() -> str:
+            d = _deezer_get('https://api.deezer.com/search/artist', params={'q': name, 'limit': 5})
+            rows = (d or {}).get('data') or [] if isinstance(d, dict) else []
+            if not rows:
+                return ''
+            sk = norm_core(name)
+            for a in rows:
+                if not isinstance(a, dict):
+                    continue
+                if sk and norm_core(a.get('name') or '') == sk:
+                    pic = _pick_deezer_artist_pic(a)
+                    if pic:
+                        return pic
+            first = rows[0]
+            if isinstance(first, dict):
+                return _pick_deezer_artist_pic(first)
+            return ''
+
+        return cached_artist_url('deezer', name, _fetch)
 
     def search_song_hits(self, term: str) -> list[dict]:
         hits: list[dict] = []

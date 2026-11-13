@@ -6,6 +6,7 @@ import hashlib
 import io
 import os
 import re
+import struct
 from base64 import b64decode, b64encode
 from collections import Counter, OrderedDict
 from collections.abc import Iterable
@@ -35,20 +36,27 @@ from tag_io import (
     iter_tag_values,
     parse_filename_clues,
     read_audio_info,
+    read_pictures,
     sniff_container,
     write_lrc_file,
 )
 
 IMG_EXT = {'.jpg', '.jpeg', '.png', '.webp', '.bmp'}
 COVER_NAMES = {'cover', 'folder', 'front', 'album', 'albumart'}
+ARTIST_NAMES = {'artist', 'artistart', 'author', 'singer', 'band'}
 MAX_SIDE = 1000
 EMBED_MAX_SIDE = 1400
+ARTIST_MAX_SIDE = 1000
 JPEG_QUALITY = 90
+ARTIST_JPEG_QUALITY = 100
+ARTIST_MAX_BYTES = 200 * 1024
 HUGE_BYTES = 2 * 1024 * 1024
 HUGE_PIXELS = 4_000_000
 COVER_FRONT_TYPE = 3
+ARTIST_PIC_TYPE = 8
 SAME_ART_DISTANCE = 12
 SUPPORTS_COVER_WRITE = {'flac', 'mp4', 'mp3', 'wav', 'aiff', 'ogg', 'opus'}
+SUPPORTS_ARTIST_WRITE = {'flac', 'mp3', 'wav', 'aiff', 'ogg', 'opus'}
 LYRICS_MODES = ('auto', 'embed', 'lrc', 'both')
 
 _DATE_DIR_PREFIX_RE = re.compile(r'^\d{2,4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2}\s*')
@@ -78,7 +86,7 @@ _ID3_WRITE_TABLE = {
 }
 
 DELETABLE_FIELDS: tuple[str, ...] = (
-    'cover', 'title', 'artist', 'albumartist', 'album', 'date',
+    'cover', 'artist_cover', 'title', 'artist', 'albumartist', 'album', 'date',
     'composer', 'performer', 'genre', 'tracknumber', 'discnumber', 'comment', 'lyrics',
 )
 SETTABLE_FIELDS: tuple[str, ...] = (
@@ -134,6 +142,12 @@ class TrackArtTagPlan:
     needs_cover_fix: bool = False
     target_pic_bytes: bytes | None = None
     target_pic_mime: str = 'image/jpeg'
+    artist_status: str = '正常'
+    artist_reasons: list[str] = field(default_factory=list)
+    needs_artist_fix: bool = False
+    has_artist_art: bool = False
+    target_artist_bytes: bytes | None = None
+    target_artist_mime: str = 'image/jpeg'
     tag_updates: dict[str, str] = field(default_factory=dict)
     needs_tag_fix: bool = False
 
@@ -147,31 +161,110 @@ class FolderArtPlan:
     backup_path: str = ''
     cover_jpeg: bytes | None = None
     detail: str = ''
+    artist_cover_action: str = 'ok'
+    artist_cover_path: str = ''
+    backup_artist_path: str = ''
+    artist_cover_jpeg: bytes | None = None
+    artist_detail: str = ''
     track_plans: dict[str, TrackArtTagPlan] = field(default_factory=dict)
 
     @property
     def has_folder_cover_work(self) -> bool:
         return self.cover_action in ('create', 'rewrite', 'remove')
 
+    @property
+    def has_folder_artist_work(self) -> bool:
+        return self.artist_cover_action in ('create', 'rewrite', 'remove')
+
+    @property
+    def artist_action(self) -> str:
+        return self.artist_cover_action
+
+    @artist_action.setter
+    def artist_action(self, val: str):
+        self.artist_cover_action = val
+
+    @property
+    def artist_path(self) -> str:
+        return self.artist_cover_path
+
+    @artist_path.setter
+    def artist_path(self, val: str):
+        self.artist_cover_path = val
+
 
 def _lanczos():
     return getattr(getattr(Image, 'Resampling', Image), 'LANCZOS', getattr(Image, 'LANCZOS', 1))
 
 
+_SNIFF_IMAGE_CACHE: dict[tuple, tuple[str, int, int] | None] = {}
+_AHASH_CACHE: dict[tuple, int] = {}
+_NORM_JPEG_CACHE: dict[tuple, bytes | None] = {}
+_NORM_ARTIST_JPEG_CACHE: dict[tuple, bytes | None] = {}
+
+
 def sniff_image(data: bytes) -> tuple[str, int, int] | None:
-    if not data:
+    if not data or len(data) < 16:
         return None
+    cache_key = (len(data), data[:48], data[-48:])
+    if cache_key in _SNIFF_IMAGE_CACHE:
+        return _SNIFF_IMAGE_CACHE[cache_key]
+
+    # Fast header check for JPEG
+    if data[:2] == b'\xff\xd8':
+        try:
+            idx = 2
+            d_len = len(data)
+            while idx < d_len - 8:
+                if data[idx] != 0xff:
+                    idx += 1
+                    continue
+                marker = data[idx + 1]
+                if marker in (0xc0, 0xc1, 0xc2, 0xc3):
+                    h, w = struct.unpack('>HH', data[idx + 5:idx + 9])
+                    res = ('JPEG', int(w), int(h))
+                    if len(_SNIFF_IMAGE_CACHE) > 5000:
+                        _SNIFF_IMAGE_CACHE.clear()
+                    _SNIFF_IMAGE_CACHE[cache_key] = res
+                    return res
+                if marker in (0xd9, 0xda):
+                    break
+                block_len = struct.unpack('>H', data[idx + 2:idx + 4])[0]
+                idx += 2 + block_len
+        except Exception:
+            pass
+
+    # Fast header check for PNG
+    if data[:8] == b'\x89PNG\r\n\x1a\n' and len(data) >= 24:
+        try:
+            w, h = struct.unpack('>II', data[16:24])
+            res = ('PNG', int(w), int(h))
+            if len(_SNIFF_IMAGE_CACHE) > 5000:
+                _SNIFF_IMAGE_CACHE.clear()
+            _SNIFF_IMAGE_CACHE[cache_key] = res
+            return res
+        except Exception:
+            pass
+
     try:
         im = Image.open(io.BytesIO(data))
         im.load()
-        return str(im.format or ''), int(im.size[0]), int(im.size[1])
+        res = (str(im.format or ''), int(im.size[0]), int(im.size[1]))
     except Exception:
-        return None
+        res = None
+
+    if len(_SNIFF_IMAGE_CACHE) > 5000:
+        _SNIFF_IMAGE_CACHE.clear()
+    _SNIFF_IMAGE_CACHE[cache_key] = res
+    return res
 
 
 def normalize_jpeg(data: bytes, max_side: int = MAX_SIDE) -> bytes | None:
     if not data:
         return None
+    cache_key = (len(data), data[:48], data[-48:], max_side)
+    if cache_key in _NORM_JPEG_CACHE:
+        return _NORM_JPEG_CACHE[cache_key]
     try:
         im = Image.open(io.BytesIO(data))
         im.load()
@@ -182,18 +275,81 @@ def normalize_jpeg(data: bytes, max_side: int = MAX_SIDE) -> bytes | None:
             im.thumbnail((max_side, max_side), _lanczos())
         buf = io.BytesIO()
         im.save(buf, 'JPEG', quality=JPEG_QUALITY, optimize=True, progressive=False)
-        return buf.getvalue()
+        out = buf.getvalue()
+        if len(_NORM_JPEG_CACHE) > 2000:
+            _NORM_JPEG_CACHE.clear()
+        _NORM_JPEG_CACHE[cache_key] = out
+        return out
+    except Exception:
+        return None
+
+
+def normalize_artist_jpeg(
+    data: bytes,
+    max_side: int = ARTIST_MAX_SIDE,
+    quality: int = ARTIST_JPEG_QUALITY,
+    max_bytes: int = ARTIST_MAX_BYTES,
+) -> bytes | None:
+    """将艺术家图片规范化为最大边不超过 max_side、以质量 100（JPEG 格式）优先输出、单曲体积增量控制在 50~200KB 范围内的优化字节。"""
+    if not data:
+        return None
+    cache_key = (len(data), data[:48], data[-48:], max_side, quality, max_bytes)
+    if cache_key in _NORM_ARTIST_JPEG_CACHE:
+        return _NORM_ARTIST_JPEG_CACHE[cache_key]
+    try:
+        im = Image.open(io.BytesIO(data))
+        im.load()
+        if im.mode not in ('RGB', 'L'):
+            im = im.convert('RGB')
+        cur_side = max_side
+        if max(im.size) > cur_side:
+            im = im.copy()
+            im.thumbnail((cur_side, cur_side), _lanczos())
+        buf = io.BytesIO()
+        im.save(buf, 'JPEG', quality=quality, optimize=True, progressive=False)
+        out = buf.getvalue()
+
+        # 若体积超出上限（200KB），自适应阶梯调优以严格控重在 200KB 内
+        if max_bytes and len(out) > max_bytes:
+            for q in (96, 92, 88, 85, 80):
+                buf = io.BytesIO()
+                im.save(buf, 'JPEG', quality=q, optimize=True, progressive=False)
+                candidate = buf.getvalue()
+                if len(candidate) <= max_bytes:
+                    out = candidate
+                    break
+            else:
+                step_im = im.copy()
+                while len(out) > max_bytes and max(step_im.size) > 300:
+                    cur_side = int(max(step_im.size) * 0.85)
+                    step_im.thumbnail((cur_side, cur_side), _lanczos())
+                    buf = io.BytesIO()
+                    step_im.save(buf, 'JPEG', quality=85, optimize=True, progressive=False)
+                    out = buf.getvalue()
+
+        if len(_NORM_ARTIST_JPEG_CACHE) > 2000:
+            _NORM_ARTIST_JPEG_CACHE.clear()
+        _NORM_ARTIST_JPEG_CACHE[cache_key] = out
+        return out
     except Exception:
         return None
 
 
 def ahash(data: bytes) -> int:
+    if not data:
+        return 0
+    cache_key = (len(data), data[:48], data[-48:])
+    if cache_key in _AHASH_CACHE:
+        return _AHASH_CACHE[cache_key]
     px = Image.open(io.BytesIO(data)).convert('L').resize((9, 8), _lanczos()).tobytes()
     bits = 0
     for r in range(8):
         row = px[r * 9:(r + 1) * 9]
         for c in range(8):
             bits = (bits << 1) | (1 if row[c] > row[c + 1] else 0)
+    if len(_AHASH_CACHE) > 5000:
+        _AHASH_CACHE.clear()
+    _AHASH_CACHE[cache_key] = bits
     return bits
 
 
@@ -208,52 +364,67 @@ def same_art(data_a: bytes, data_b: bytes) -> bool:
         return False
 
 
-def read_pictures(audio, container: str | None = None) -> list[dict]:
-    out: list[dict] = []
-    try:
-        if isinstance(audio, FLAC) or container == 'flac':
-            for p in getattr(audio, 'pictures', []) or []:
-                out.append({'mime': p.mime or '', 'type': int(p.type), 'data': p.data})
-        elif isinstance(audio, MP4) or container == 'mp4':
-            for c in (getattr(audio, 'tags', None) or {}).get('covr', []):
-                mime = 'image/png' if getattr(c, 'imageformat', None) == MP4Cover.FORMAT_PNG else 'image/jpeg'
-                out.append({'mime': mime, 'type': COVER_FRONT_TYPE, 'data': bytes(c)})
-        elif isinstance(getattr(audio, 'tags', None), ID3):
-            for k in audio.tags.getall('APIC'):
-                out.append({'mime': k.mime or '', 'type': int(k.type), 'data': k.data})
-        elif getattr(audio, 'tags', None) is not None and 'metadata_block_picture' in audio.tags:
-            for v in audio.tags['metadata_block_picture']:
-                pic = Picture(b64decode(v))
-                out.append({'mime': pic.mime or '', 'type': int(pic.type), 'data': pic.data})
-    except Exception:
-        pass
-    return out
-
-
-def apply_single_front_cover(audio, container: str, data: bytes, mime: str = 'image/jpeg') -> bool:
+def apply_picture_to_audio(
+    audio, container: str, data: bytes, pic_type: int = COVER_FRONT_TYPE, mime: str = 'image/jpeg',
+) -> bool:
+    """非破坏性写入指定类型的图片（保留其他类型的已有图片，如同时保留封面与艺术家图）。"""
     if container not in SUPPORTS_COVER_WRITE:
+        return False
+    if pic_type == ARTIST_PIC_TYPE and container not in SUPPORTS_ARTIST_WRITE:
         return False
     if getattr(audio, 'tags', None) is None and hasattr(audio, 'add_tags'):
         audio.add_tags()
+
+    desc = 'Cover (front)' if pic_type == COVER_FRONT_TYPE else ('Artist' if pic_type == ARTIST_PIC_TYPE else 'Picture')
+
     if container == 'flac' or isinstance(audio, FLAC):
         pic = Picture()
-        pic.type, pic.mime, pic.desc, pic.data = COVER_FRONT_TYPE, mime, 'Cover (front)', data
+        pic.type, pic.mime, pic.desc, pic.data = pic_type, mime, desc, data
+        old_pics = [p for p in (getattr(audio, 'pictures', []) or []) if int(p.type) != pic_type]
         audio.clear_pictures()
+        for p in old_pics:
+            audio.add_picture(p)
         audio.add_picture(pic)
         return True
+
     if container == 'mp4' or isinstance(audio, MP4):
-        audio.tags['covr'] = [MP4Cover(data, imageformat=MP4Cover.FORMAT_PNG if mime == 'image/png' else MP4Cover.FORMAT_JPEG)]
-        return True
+        if pic_type == COVER_FRONT_TYPE:
+            audio.tags['covr'] = [MP4Cover(data, imageformat=MP4Cover.FORMAT_PNG if mime == 'image/png' else MP4Cover.FORMAT_JPEG)]
+            return True
+        return False
+
     if container in ('mp3', 'wav', 'aiff') or isinstance(getattr(audio, 'tags', None), ID3):
+        old_apics = [f for f in audio.tags.getall('APIC') if getattr(f, 'type', None) != pic_type]
         audio.tags.delall('APIC')
-        audio.tags.add(APIC(encoding=3, mime=mime, type=COVER_FRONT_TYPE, desc='Cover (front)', data=data))
+        for f in old_apics:
+            audio.tags.add(f)
+        audio.tags.add(APIC(encoding=3, mime=mime, type=pic_type, desc=desc, data=data))
         return True
+
     if container in ('ogg', 'opus') and audio.tags is not None:
         pic = Picture()
-        pic.type, pic.mime, pic.desc, pic.data = COVER_FRONT_TYPE, mime, 'Cover (front)', data
-        audio.tags['metadata_block_picture'] = [b64encode(pic.write()).decode('ascii')]
+        pic.type, pic.mime, pic.desc, pic.data = pic_type, mime, desc, data
+        kept: list[str] = []
+        for v in (audio.tags.get('metadata_block_picture') or []):
+            try:
+                p_old = Picture(b64decode(v))
+                if int(p_old.type) != pic_type:
+                    kept.append(v)
+            except Exception:
+                pass
+        kept.append(b64encode(pic.write()).decode('ascii'))
+        audio.tags['metadata_block_picture'] = kept
         return True
+
     return False
+
+
+def apply_single_front_cover(audio, container: str, data: bytes, mime: str = 'image/jpeg') -> bool:
+    return apply_picture_to_audio(audio, container, data, pic_type=COVER_FRONT_TYPE, mime=mime)
+
+
+def apply_artist_picture(audio, container: str, data: bytes, mime: str = 'image/jpeg') -> bool:
+    return apply_picture_to_audio(audio, container, data, pic_type=ARTIST_PIC_TYPE, mime=mime)
 
 
 _LYRICS_WRITE_KEYS = {
@@ -328,8 +499,8 @@ def plan_picture_fix(pics: list[dict], album_jpeg: bytes | None) -> tuple[bool, 
         return (False, ['no-cover-source'], None, 'image/jpeg') if album_jpeg is None else (True, ['no-cover'], album_jpeg, 'image/jpeg')
     if not fronts:
         reasons.append('no-front(type!=3)')
-    if len(pics) > 1:
-        reasons.append(f'multi-pic({len(pics)})')
+    if len(fronts) > 1:
+        reasons.append(f'multi-front({len(fronts)})')
 
     base, (fmt, w, h) = fronts[0] if fronts else decodable[0]
     data = base['data']
@@ -345,6 +516,37 @@ def plan_picture_fix(pics: list[dict], album_jpeg: bytes | None) -> tuple[bool, 
         return False, [], None, 'image/jpeg'
     if base['type'] != COVER_FRONT_TYPE:
         reasons.append(f"type-fixed({base['type']}->3)")
+    return True, reasons, data, mime
+
+
+def plan_artist_picture_fix(pics: list[dict], artist_jpeg: bytes | None) -> tuple[bool, list[str], bytes | None, str]:
+    """只读分析曲目是否包含有效的内嵌艺术家图片（Type 8），以及是否需要规范化或补齐。"""
+    reasons: list[str] = []
+    decodable: list[tuple[dict, tuple[str, int, int]]] = []
+    for p in pics:
+        info = sniff_image(p['data'])
+        if info:
+            decodable.append((p, info))
+    artists = [(p, i) for p, i in decodable if p['type'] in (ARTIST_PIC_TYPE, 7)]
+    if not artists:
+        return (False, ['no-artist-art-source'], None, 'image/jpeg') if artist_jpeg is None else (True, ['no-artist-art'], artist_jpeg, 'image/jpeg')
+    if len(artists) > 1:
+        reasons.append(f'multi-artist({len(artists)})')
+
+    base, (fmt, w, h) = artists[0]
+    data = base['data']
+    mime = 'image/png' if fmt == 'PNG' else ('image/jpeg' if fmt in ('JPEG', 'MPO') else f'image/{fmt.lower()}')
+    if (base['mime'] or '').lower() != mime:
+        reasons.append(f"mime-mismatch({base['mime'] or '空'}!={mime})")
+    if max(w, h) > ARTIST_MAX_SIDE or len(data) > 1024 * 1024:
+        reasons.append(f'oversize({w}x{h},{len(data) / 1048576.0:.1f}MB)')
+        shrunk = normalize_artist_jpeg(data, ARTIST_MAX_SIDE)
+        if shrunk:
+            data, mime = shrunk, 'image/jpeg'
+    if not reasons:
+        return False, [], None, 'image/jpeg'
+    if base['type'] != ARTIST_PIC_TYPE:
+        reasons.append(f"type-fixed({base['type']}->8)")
     return True, reasons, data, mime
 
 
@@ -369,6 +571,35 @@ def _pick_folder_image(folder: str) -> bytes | None:
         if not info:
             continue
         rank = (3 if os.path.splitext(name)[0].lower() in COVER_NAMES else 1, info[1] * info[2])
+        if best is None or rank > best[0]:
+            best = (rank, data)
+    return best[1] if best else None
+
+
+def _pick_folder_artist_image(folder: str) -> bytes | None:
+    best = None
+    try:
+        names = sorted(os.listdir(folder))
+    except OSError:
+        return None
+    for name in names:
+        if os.path.splitext(name)[1].lower() not in IMG_EXT:
+            continue
+        p = os.path.join(folder, name)
+        if not os.path.isfile(p):
+            continue
+        try:
+            with open(p, 'rb') as fp:
+                data = fp.read()
+        except OSError:
+            continue
+        info = sniff_image(data)
+        if not info:
+            continue
+        stem = os.path.splitext(name)[0].lower()
+        if stem not in ARTIST_NAMES:
+            continue
+        rank = (3 if stem == 'artist' else 1, info[1] * info[2])
         if best is None or rank > best[0]:
             best = (rank, data)
     return best[1] if best else None
@@ -438,20 +669,24 @@ def analyze_folder_art_and_tags(
         folder=folder,
         cover_path=os.path.join(folder, 'cover.jpg'),
         backup_path=os.path.join(folder, 'disabled-cover.jpg.bak'),
+        artist_cover_path=os.path.join(folder, 'artist.jpg'),
+        backup_artist_path=os.path.join(folder, 'disabled-artist.jpg.bak'),
     )
     records: list[dict] = []
     for p in audio_paths:
         info = pre_read_infos.get(p) if pre_read_infos else None
         if info is None:
             info = read_audio_info(p)
-        loader = LOADERS.get(info.get('container')) if not info.get('error') else None
-        if loader is None:
-            continue
-        try:
-            pics = read_pictures(loader(p), info['container'])
-        except Exception:
-            pics = []
-        records.append({'path': p, 'norm': os.path.normcase(os.path.abspath(p)), 'info': info, 'container': info['container'], 'pics': pics})
+        pics = info.get('pics')
+        if pics is None:
+            loader = LOADERS.get(info.get('container')) if not info.get('error') else None
+            if loader is None:
+                continue
+            try:
+                pics = read_pictures(loader(p), info.get('container'))
+            except Exception:
+                pics = []
+        records.append({'path': p, 'norm': os.path.normcase(os.path.abspath(p)), 'info': info, 'container': info.get('container'), 'pics': pics})
     if not records:
         return plan
 
@@ -519,6 +754,59 @@ def analyze_folder_art_and_tags(
             plan.cover_action, plan.detail = 'mixed-skip', f'目录含 {len(groups)} 张专辑（{names}），跳过外置封面'
 
     folder_maj = _compute_majority_tags(records) if single else None
+
+    # 统计目录内的艺术家图片（内嵌或外置）
+    artist_votes: OrderedDict[str, list] = OrderedDict()
+    for rec in records:
+        for pic in rec['pics']:
+            if pic['type'] in (ARTIST_PIC_TYPE, 7):
+                pinfo = sniff_image(pic['data'])
+                if not pinfo:
+                    continue
+                h = hashlib.md5(pic['data']).hexdigest()
+                type_rank = 1 if pic['type'] == ARTIST_PIC_TYPE else 0
+                if h not in artist_votes:
+                    artist_votes[h] = [type_rank, 1, pinfo[1] * pinfo[2], pic['data']]
+                else:
+                    artist_votes[h][0] = max(artist_votes[h][0], type_rank)
+                    artist_votes[h][1] += 1
+    best_artist_jpeg = (
+        normalize_artist_jpeg(sorted(artist_votes.values(), key=lambda x: (x[0], x[1], x[2]), reverse=True)[0][3], ARTIST_MAX_SIDE)
+        if artist_votes else None
+    )
+    if best_artist_jpeg is None:
+        raw_art_dir = _pick_folder_artist_image(folder)
+        if raw_art_dir:
+            best_artist_jpeg = normalize_artist_jpeg(raw_art_dir, ARTIST_MAX_SIDE)
+
+    distinct_artists = {
+        (rec['info'].get('albumartist') or rec['info'].get('artist') or '').strip().lower()
+        for rec in records if (rec['info'].get('albumartist') or rec['info'].get('artist') or '').strip()
+    }
+    same_artist_in_folder = len(distinct_artists) <= 1
+
+    if single or same_artist_in_folder:
+        plan.artist_cover_jpeg = best_artist_jpeg
+        if best_artist_jpeg is None:
+            plan.artist_cover_action = 'nodata'
+        elif not os.path.exists(plan.artist_cover_path):
+            plan.artist_cover_action, plan.artist_detail = 'create', '目录缺少外置 artist.jpg'
+        else:
+            try:
+                with open(plan.artist_cover_path, 'rb') as fp:
+                    old_art = fp.read()
+                if old_art == best_artist_jpeg or same_art(old_art, best_artist_jpeg):
+                    plan.artist_cover_action = 'ok'
+                else:
+                    plan.artist_cover_action, plan.artist_detail = 'rewrite', '外置 artist.jpg 与代表艺术家图不一致，需重写'
+            except OSError:
+                plan.artist_cover_action, plan.artist_detail = 'rewrite', '外置 artist.jpg 读取异常，需重写'
+    else:
+        if os.path.exists(plan.artist_cover_path):
+            plan.artist_cover_action, plan.artist_detail = 'remove', '目录含多位不同艺术家，需撤回误放的 artist.jpg'
+        else:
+            plan.artist_cover_action, plan.artist_detail = 'mixed-skip', '目录含多位不同艺术家，跳过外置 artist.jpg'
+
     for alb_key, grp_recs in groups.items():
         tgt_jpeg, tgt_hash = album_targets.get(alb_key), album_hashes.get(alb_key)
         grp_maj = folder_maj if single else _compute_majority_tags(grp_recs)
@@ -537,6 +825,14 @@ def analyze_folder_art_and_tags(
                 reasons.append(f'{container}暂不支持写封面')
 
             cov_status = ('待修:' + ','.join(reasons)) if need_pic else ('缺封面(无可用图源)' if 'no-cover-source' in reasons else '正常')
+
+            need_art_pic, art_reasons, tgt_art_bytes, tgt_art_mime = plan_artist_picture_fix(pics, plan.artist_cover_jpeg)
+            if need_art_pic and container not in SUPPORTS_ARTIST_WRITE:
+                need_art_pic = False
+                art_reasons.append(f'{container}暂不支持写艺术家图')
+            has_art_pic = any(p['type'] in (ARTIST_PIC_TYPE, 7) for p in pics)
+            art_status = ('待修:' + ','.join(art_reasons)) if need_art_pic else ('缺艺术家图(无可用图源)' if 'no-artist-art-source' in art_reasons else '正常')
+
             tag_updates: dict[str, str] = {}
             if single or (info.get('album') or '').strip():
                 for f in ('album', 'albumartist', 'date', 'genre'):
@@ -560,7 +856,10 @@ def analyze_folder_art_and_tags(
 
             plan.track_plans[rec['norm']] = TrackArtTagPlan(
                 path=rec['path'], cover_status=cov_status, cover_reasons=reasons, needs_cover_fix=need_pic,
-                target_pic_bytes=tgt_bytes, target_pic_mime=tgt_mime, tag_updates=tag_updates, needs_tag_fix=bool(tag_updates),
+                target_pic_bytes=tgt_bytes, target_pic_mime=tgt_mime,
+                artist_status=art_status, artist_reasons=art_reasons, needs_artist_fix=need_art_pic,
+                has_artist_art=has_art_pic, target_artist_bytes=tgt_art_bytes, target_artist_mime=tgt_art_mime,
+                tag_updates=tag_updates, needs_tag_fix=bool(tag_updates),
             )
     return plan
 
@@ -584,21 +883,54 @@ def apply_folder_cover_file(plan: FolderArtPlan) -> tuple[bool, str]:
     return True, '无需处理外置封面'
 
 
+def apply_folder_artist_file(plan: FolderArtPlan) -> tuple[bool, str]:
+    """为单专辑目录写入或重写外置 artist.jpg（多艺术家混放目录撤回备份）。"""
+    if plan.artist_cover_action in ('create', 'rewrite'):
+        if not plan.artist_cover_jpeg:
+            return False, '无可用艺术家图片数据'
+        try:
+            with open(plan.artist_cover_path, 'wb') as fp:
+                fp.write(plan.artist_cover_jpeg)
+            return True, '已生成 artist.jpg' if plan.artist_cover_action == 'create' else '已重写 artist.jpg'
+        except OSError as err:
+            return False, f'写入 artist.jpg 失败: {err}'
+    if plan.artist_cover_action == 'remove' and os.path.exists(plan.artist_cover_path):
+        try:
+            os.replace(plan.artist_cover_path, plan.backup_artist_path)
+            return True, '已撤回多艺术家目录 artist.jpg -> disabled-artist.jpg.bak'
+        except OSError as err:
+            return False, f'撤回 artist.jpg 失败: {err}'
+    return True, '无需处理外置艺术家图片'
+
+
+def delete_folder_artist_file(folder: str) -> tuple[bool, str]:
+    p = os.path.join(folder, 'artist.jpg')
+    if os.path.isfile(p):
+        try:
+            os.remove(p)
+            return True, '已删除目录 artist.jpg'
+        except OSError as err:
+            return False, f'删除 artist.jpg 失败: {err}'
+    return True, '目录不存在 artist.jpg'
+
+
 def apply_track_repairs(
     path: str,
     tag_updates: dict[str, str] | None = None,
     cover_bytes: bytes | None = None,
     cover_mime: str = 'image/jpeg',
+    artist_bytes: bytes | None = None,
+    artist_mime: str = 'image/jpeg',
     tracknumber: int | None = None,
     discnumber: int | None = None,
     overwrite_track: bool = False,
     lyrics: str | None = None,
     lyrics_mode: str = 'auto',
 ) -> tuple[bool, str]:
-    """在单次原子临时副本上合并执行标签补全、封面规范、歌词写入与音轨/碟号写入。"""
+    """在单次原子临时副本上合并执行标签补全、封面/艺术家规范、歌词写入与音轨/碟号写入。"""
     tag_updates = dict(tag_updates or {})
     lyrics_txt = str(lyrics or '').replace('\r\n', '\n').strip()
-    if not tag_updates and cover_bytes is None and tracknumber is None and discnumber is None and not lyrics_txt:
+    if not tag_updates and cover_bytes is None and artist_bytes is None and tracknumber is None and discnumber is None and not lyrics_txt:
         return True, '无需写入'
     state = read_audio_info(path)
     if state.get('error'):
@@ -608,7 +940,7 @@ def apply_track_repairs(
     if write_tn is not None and not overwrite_track:
         cur_tn = state.get('track_int')
         if cur_tn is not None and cur_tn > 0:
-            if not tag_updates and cover_bytes is None and discnumber is None and not lyrics_txt:
+            if not tag_updates and cover_bytes is None and artist_bytes is None and discnumber is None and not lyrics_txt:
                 return (True, '已有相同音轨号') if cur_tn == int(write_tn) else (False, f"已有音轨号 ({state.get('tracknumber')})，跳过覆盖")
             write_tn = None
     write_dn = int(discnumber) if (discnumber is not None and int(discnumber) > 0 and not state.get('disc_int')) else None
@@ -633,7 +965,7 @@ def apply_track_repairs(
             want_embed_lyrics = True
             want_lrc_file = True
 
-    if not tag_updates and cover_bytes is None and write_tn is None and write_dn is None and not want_embed_lyrics and not want_lrc_file:
+    if not tag_updates and cover_bytes is None and artist_bytes is None and write_tn is None and write_dn is None and not want_embed_lyrics and not want_lrc_file:
         return True, '无需写入'
 
     applied_fields: set[str] = set()
@@ -652,6 +984,10 @@ def apply_track_repairs(
             if not apply_single_front_cover(audio, c_type, cover_bytes, cover_mime or 'image/jpeg'):
                 raise RuntimeError(f'{c_type} 容器暂不支持写入封面')
             did.append('封面已规范')
+        if artist_bytes is not None and c_type in SUPPORTS_ARTIST_WRITE:
+            if not apply_artist_picture(audio, c_type, artist_bytes, artist_mime or 'image/jpeg'):
+                raise RuntimeError(f'{c_type} 容器暂不支持写入艺术家图片')
+            did.append('已内嵌艺术家图片')
         if want_embed_lyrics:
             if apply_lyrics_to_audio(audio, c_type, lyrics_txt):
                 wrote_embedded_lyrics = True
@@ -665,7 +1001,8 @@ def apply_track_repairs(
         return (bool(did), '，'.join(did) if did else '无需改写')
 
     def _verify(chk_path: str, c_type: str):
-        chk_info = read_audio_info(chk_path) if (write_tn is not None or write_dn is not None or applied_fields or wrote_embedded_lyrics) else {}
+        need_info = bool(write_tn is not None or write_dn is not None or applied_fields or wrote_embedded_lyrics or cover_bytes is not None or artist_bytes is not None)
+        chk_info = read_audio_info(chk_path) if need_info else {}
         if write_tn is not None and chk_info.get('track_int') != int(write_tn):
             return False, '音轨号校验失败'
         if write_dn is not None and chk_info.get('disc_int') != int(write_dn):
@@ -676,14 +1013,22 @@ def apply_track_repairs(
                 return False, f'{fn}标签写回校验失败'
         if wrote_embedded_lyrics and not chk_info.get('has_embedded_lyrics'):
             return False, '歌词写回校验失败'
+        pics = chk_info.get('pics')
+        if (cover_bytes is not None or artist_bytes is not None) and pics is None and c_type in LOADERS:
+            try:
+                pics = read_pictures(LOADERS[c_type](chk_path), c_type)
+            except Exception:
+                pics = []
         if cover_bytes is not None and c_type in SUPPORTS_COVER_WRITE:
-            pics = read_pictures(LOADERS[c_type](chk_path), c_type)
-            if not pics or not sniff_image(pics[0]['data']):
+            if not any(int(p['type']) == COVER_FRONT_TYPE and sniff_image(p['data']) for p in (pics or [])):
                 return False, '封面写回校验失败'
+        if artist_bytes is not None and c_type in SUPPORTS_ARTIST_WRITE:
+            if not any(int(p['type']) in (ARTIST_PIC_TYPE, 7) and sniff_image(p['data']) for p in (pics or [])):
+                return False, '艺术家图片写回校验失败'
         return True, ''
 
     parts: list[str] = []
-    if tag_updates or cover_bytes is not None or write_tn is not None or write_dn is not None or want_embed_lyrics:
+    if tag_updates or cover_bytes is not None or artist_bytes is not None or write_tn is not None or write_dn is not None or want_embed_lyrics:
         ok, msg = atomic_mutate_audio(path, _mutate, verify_fn=_verify)
         if not ok:
             return False, msg
@@ -707,6 +1052,7 @@ def apply_track_repairs(
     return True, '，'.join(parts) if parts else '已写入'
 
 
+
 _PIC_TAG_KEYS = {
     'vorbis': ('metadata_block_picture',),
     'mp4': ('covr',),
@@ -720,9 +1066,18 @@ def _container_family(audio, container: str) -> str:
     return '' if fam == 'id3' else fam
 
 
-def _audio_has_pictures(audio, container: str) -> bool:
-    if read_pictures(audio, container):
-        return True
+def _audio_has_pictures(audio, container: str, pic_type: int | None = None) -> bool:
+    pics = read_pictures(audio, container)
+    if pics:
+        if pic_type is None:
+            return True
+        if pic_type == ARTIST_PIC_TYPE:
+            return any(int(p.get('type', 0)) in (ARTIST_PIC_TYPE, 7) for p in pics)
+        if pic_type == COVER_FRONT_TYPE:
+            return any(int(p.get('type', 0)) not in (ARTIST_PIC_TYPE, 7) for p in pics)
+        return any(int(p.get('type', 0)) == pic_type for p in pics)
+    if pic_type is not None and pic_type != COVER_FRONT_TYPE:
+        return False
     tags = getattr(audio, 'tags', None)
     if tags is None:
         return False
@@ -788,12 +1143,60 @@ def delete_pictures_from_audio(audio, container: str) -> bool:
     return removed
 
 
+def delete_artist_pictures_from_audio(audio, container: str) -> bool:
+    """仅移除音频中的内嵌艺术家图片（Type 8/7），保留封面等其它图片。"""
+    removed = False
+    if container == 'flac' or isinstance(audio, FLAC):
+        pics = getattr(audio, 'pictures', []) or []
+        kept = [p for p in pics if int(getattr(p, 'type', 0)) not in (ARTIST_PIC_TYPE, 7)]
+        if len(kept) != len(pics):
+            audio.clear_pictures()
+            for p in kept:
+                audio.add_picture(p)
+            removed = True
+    tags = getattr(audio, 'tags', None)
+    if tags is None:
+        return removed
+    fam = container_family(audio, container)
+    if fam == 'id3':
+        apics = tags.getall('APIC')
+        kept = [f for f in apics if getattr(f, 'type', None) not in (ARTIST_PIC_TYPE, 7)]
+        if len(kept) != len(apics):
+            tags.delall('APIC')
+            for f in kept:
+                tags.add(f)
+            removed = True
+        return removed
+    if fam == 'vorbis' and tags is not None and 'metadata_block_picture' in tags:
+        kept_b64 = []
+        changed = False
+        for v in tags.get('metadata_block_picture', []):
+            try:
+                p_old = Picture(b64decode(v))
+                if int(p_old.type) in (ARTIST_PIC_TYPE, 7):
+                    changed = True
+                    continue
+            except Exception:
+                pass
+            kept_b64.append(v)
+        if changed:
+            tags['metadata_block_picture'] = kept_b64
+            removed = True
+    if fam == 'ape' and tags is not None:
+        for k in ('cover art (artist)', 'artist art'):
+            if delete_keys_ci(tags, k):
+                removed = True
+    return removed
+
+
 def delete_tag_field_from_audio(
     audio, container: str, field_name: str, *, protect_163_key: bool = True,
 ) -> bool:
     """从已打开的音频对象中删除指定类别元数据标签，返回是否发生实际删除。"""
     if field_name == 'cover':
         return delete_pictures_from_audio(audio, container)
+    if field_name == 'artist_cover':
+        return delete_artist_pictures_from_audio(audio, container)
     tags = getattr(audio, 'tags', None)
     if tags is None:
         return False
@@ -875,7 +1278,7 @@ def inspect_deletable_fields(
     container = info.get('container')
     loader = LOADERS.get(container) if container else None
     audio = None
-    if loader is not None and ('cover' in req or ('comment' in req and info.get('has_163_key'))):
+    if loader is not None and ('cover' in req or 'artist_cover' in req or ('comment' in req and info.get('has_163_key'))):
         try:
             audio = loader(path)
         except Exception:
@@ -885,8 +1288,11 @@ def inspect_deletable_fields(
     protected_notes: list[str] = []
     for fn in req:
         if fn == 'cover':
-            if audio is not None and _audio_has_pictures(audio, container):
+            if audio is not None and _audio_has_pictures(audio, container, pic_type=COVER_FRONT_TYPE):
                 deletable.append('cover')
+        elif fn == 'artist_cover':
+            if audio is not None and _audio_has_pictures(audio, container, pic_type=ARTIST_PIC_TYPE):
+                deletable.append('artist_cover')
         elif fn == 'comment':
             if audio is not None:
                 has_unprot, has_163 = _has_comment_entries(audio, container)

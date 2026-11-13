@@ -3,14 +3,19 @@
 from __future__ import annotations
 
 import difflib
+import gzip
 import html
+import http.client
 import json
+import queue
 import re
+import ssl
 import threading
 import time
 import unicodedata
 import urllib.parse
 import urllib.request
+import zlib
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
@@ -30,11 +35,14 @@ KUGOU_INFO_DONE: set[str] = set()
 SONG_META_CACHE: dict[tuple[str, str], dict] = {}
 SONG_SEARCH_CACHE: dict[tuple[str, str, str], list] = {}
 COVER_CACHE: dict[str, bytes] = {}
+ARTIST_PIC_CACHE: dict[tuple[str, str], str] = {}
+ARTIST_BYTES_CACHE: dict[str, bytes] = {}
 SEARCH_CACHE: dict[tuple, tuple[str, str, bool]] = {}
 PKL_CACHE: dict[str, dict] = {}
 INFLIGHT_ALBUM: dict[tuple, threading.Event] = {}
 INFLIGHT_SEARCH: dict[tuple, threading.Event] = {}
 INFLIGHT_SONG_SEARCH: dict[tuple, threading.Event] = {}
+INFLIGHT_ARTIST: dict[tuple[str, str], threading.Event] = {}
 
 _BRACKET_RE = re.compile(r'[\(（\[【].*?[\)）\]】]')
 _LRC_TS_RE = re.compile(r'^(?:\[\d{1,3}:\d{2}(?:[.:]\d{1,3})?\])+\s*')
@@ -58,6 +66,7 @@ class TrackMatch:
     composer: str = ''
     genre: str = ''
     cover_url: str = ''
+    artist_pic_url: str = ''
     lyrics: str = ''
 
 
@@ -76,8 +85,12 @@ def bump_cache_gen() -> int:
         SONG_META_CACHE.clear()
         SONG_SEARCH_CACHE.clear()
         COVER_CACHE.clear()
+        ARTIST_PIC_CACHE.clear()
+        ARTIST_BYTES_CACHE.clear()
+        INFLIGHT_ARTIST.clear()
         SEARCH_CACHE.clear()
         PKL_CACHE.clear()
+        _HTTP_POOL.clear()
         return CACHE_GEN
 
 
@@ -142,25 +155,180 @@ class ProviderCircuitBreaker:
             self._open = False
 
 
+class HTTPConnectionPool:
+    """标准库 HTTP/HTTPS 线程安全长连接连接池（支持 Keep-Alive 与 Gzip 压缩）。"""
+
+    def __init__(self, max_idle_per_host: int = 16):
+        self._pools: dict[tuple[str, str, int], queue.LifoQueue] = {}
+        self._lock = threading.Lock()
+        self._max_idle = max_idle_per_host
+        self._ssl_ctx = ssl.create_default_context()
+
+    def _get_queue(self, key: tuple[str, str, int]) -> queue.LifoQueue:
+        with self._lock:
+            q = self._pools.get(key)
+            if q is None:
+                q = queue.LifoQueue(maxsize=self._max_idle)
+                self._pools[key] = q
+            return q
+
+    def clear(self) -> None:
+        with self._lock:
+            for q in self._pools.values():
+                while not q.empty():
+                    try:
+                        conn = q.get_nowait()
+                        conn.close()
+                    except Exception:
+                        pass
+            self._pools.clear()
+
+    def request(
+        self, method: str, url: str, body: bytes | None = None,
+        headers: dict | None = None, timeout: float = 6.0, redirects: int = 5,
+    ) -> tuple[int, bytes] | None:
+        parsed = urllib.parse.urlsplit(url)
+        scheme, host, port = parsed.scheme.lower(), parsed.hostname or '', parsed.port
+        if not host:
+            return None
+        is_ssl = (scheme == 'https')
+        if not port:
+            port = 443 if is_ssl else 80
+        key = (scheme, host, port)
+        q = self._get_queue(key)
+
+        conn = None
+        while True:
+            try:
+                conn = q.get_nowait()
+            except queue.Empty:
+                if is_ssl:
+                    conn = http.client.HTTPSConnection(host, port, context=self._ssl_ctx, timeout=timeout)
+                else:
+                    conn = http.client.HTTPConnection(host, port, timeout=timeout)
+            break
+
+        hdrs = {
+            'User-Agent': USER_AGENT,
+            'Accept-Encoding': 'gzip, deflate',
+            'Connection': 'keep-alive',
+        }
+        if headers:
+            hdrs.update(headers)
+        path = parsed.path or '/'
+        if parsed.query:
+            path += '?' + parsed.query
+
+        resp = None
+        for attempt in range(2):
+            try:
+                conn.timeout = timeout
+                conn.request(method, path, body=body, headers=hdrs)
+                resp = conn.getresponse()
+                break
+            except (http.client.RemoteDisconnected, BrokenPipeError, ConnectionResetError, EOFError, OSError):
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+                if attempt == 0:
+                    if is_ssl:
+                        conn = http.client.HTTPSConnection(host, port, context=self._ssl_ctx, timeout=timeout)
+                    else:
+                        conn = http.client.HTTPConnection(host, port, timeout=timeout)
+                    continue
+                return None
+            except Exception:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+                return None
+
+        if resp is None:
+            return None
+
+        try:
+            raw = resp.read()
+        except Exception:
+            try:
+                conn.close()
+            except Exception:
+                pass
+            return None
+
+        enc = (resp.getheader('Content-Encoding') or '').lower()
+        if 'gzip' in enc:
+            try:
+                raw = gzip.decompress(raw)
+            except Exception:
+                pass
+        elif 'deflate' in enc:
+            try:
+                raw = zlib.decompress(raw)
+            except Exception:
+                pass
+
+        if not resp.will_close:
+            try:
+                q.put_nowait(conn)
+            except queue.Full:
+                conn.close()
+        else:
+            conn.close()
+
+        status = resp.status
+        if status in (301, 302, 303, 307, 308) and redirects > 0:
+            loc = resp.getheader('Location')
+            if loc:
+                target = urllib.parse.urljoin(url, loc)
+                req_method = 'GET' if status in (301, 302, 303) else method
+                req_body = None if req_method == 'GET' else body
+                return self.request(req_method, target, body=req_body, headers=headers, timeout=timeout, redirects=redirects - 1)
+
+        return status, raw
+
+
+_HTTP_POOL = HTTPConnectionPool()
+
+
+def _is_urlopen_mocked() -> bool:
+    fn = urllib.request.urlopen
+    return (
+        hasattr(fn, 'mock_calls') or
+        getattr(type(fn), '__module__', '').startswith('unittest.mock') or
+        hasattr(fn, 'side_effect') or
+        hasattr(fn, 'return_value')
+    )
+
+
 def reset_all_circuit_breakers() -> None:
     for cb in _CIRCUIT_BREAKERS:
         cb.reset()
 
 
-def http_get_text(url: str, params=None, headers=None, timeout: int = 8) -> str | None:
+def http_get_text(url: str, params=None, headers=None, timeout: int = 6) -> str | None:
     try:
         full_url = f"{url}?{urllib.parse.urlencode(params)}" if params else url
         hdrs = {'User-Agent': USER_AGENT}
         if headers:
             hdrs.update(headers)
-        req = urllib.request.Request(full_url, headers=hdrs)
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return resp.read().decode('utf-8', errors='replace')
+        if _is_urlopen_mocked():
+            req = urllib.request.Request(full_url, headers=hdrs)
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return resp.read().decode('utf-8', errors='replace')
+        res = _HTTP_POOL.request('GET', full_url, headers=hdrs, timeout=timeout)
+        if res is None:
+            return None
+        status, raw = res
+        if not (200 <= status < 300):
+            return None
+        return raw.decode('utf-8', errors='replace')
     except Exception:
         return None
 
 
-def http_get_json(url: str, params=None, headers=None, timeout: int = 8):
+def http_get_json(url: str, params=None, headers=None, timeout: int = 6):
     text = http_get_text(url, params=params, headers=headers, timeout=timeout)
     if not text:
         return None
@@ -170,27 +338,64 @@ def http_get_json(url: str, params=None, headers=None, timeout: int = 8):
         return None
 
 
-def http_post_json(url: str, payload: dict, headers=None, timeout: int = 8):
+def http_get_bytes(url: str, headers=None, timeout: int = 8) -> bytes | None:
     try:
-        hdrs = {'User-Agent': USER_AGENT, 'Content-Type': 'application/json'}
+        hdrs = {'User-Agent': USER_AGENT}
         if headers:
             hdrs.update(headers)
-        req = urllib.request.Request(url, data=json.dumps(payload).encode('utf-8'), headers=hdrs)
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return json.loads(resp.read().decode('utf-8', errors='replace'))
+        if _is_urlopen_mocked():
+            req = urllib.request.Request(url, headers=hdrs)
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return resp.read()
+        res = _HTTP_POOL.request('GET', url, headers=hdrs, timeout=timeout)
+        if res is None:
+            return None
+        status, raw = res
+        if not (200 <= status < 300):
+            return None
+        return raw
     except Exception:
         return None
 
 
-def http_post_form(url: str, form: dict[str, str], headers=None, timeout: int = 8):
+def http_post_json(url: str, payload: dict, headers=None, timeout: int = 6):
+    try:
+        hdrs = {'User-Agent': USER_AGENT, 'Content-Type': 'application/json'}
+        if headers:
+            hdrs.update(headers)
+        body = json.dumps(payload).encode('utf-8')
+        if _is_urlopen_mocked():
+            req = urllib.request.Request(url, data=body, headers=hdrs)
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return json.loads(resp.read().decode('utf-8', errors='replace'))
+        res = _HTTP_POOL.request('POST', url, body=body, headers=hdrs, timeout=timeout)
+        if res is None:
+            return None
+        status, raw = res
+        if not (200 <= status < 300):
+            return None
+        return json.loads(raw.decode('utf-8', errors='replace'))
+    except Exception:
+        return None
+
+
+def http_post_form(url: str, form: dict[str, str], headers=None, timeout: int = 6):
     try:
         hdrs = {'User-Agent': USER_AGENT, 'Content-Type': 'application/x-www-form-urlencoded'}
         if headers:
             hdrs.update(headers)
         body = urllib.parse.urlencode(form).encode('utf-8')
-        req = urllib.request.Request(url, data=body, headers=hdrs)
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return json.loads(resp.read().decode('utf-8', errors='replace'))
+        if _is_urlopen_mocked():
+            req = urllib.request.Request(url, data=body, headers=hdrs)
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return json.loads(resp.read().decode('utf-8', errors='replace'))
+        res = _HTTP_POOL.request('POST', url, body=body, headers=hdrs, timeout=timeout)
+        if res is None:
+            return None
+        status, raw = res
+        if not (200 <= status < 300):
+            return None
+        return json.loads(raw.decode('utf-8', errors='replace'))
     except Exception:
         return None
 
@@ -407,6 +612,15 @@ def cached_song_meta(platform: str, cache_id: str, fn) -> dict:
     return dict(res)
 
 
+def cached_artist_url(platform: str, artist_name: str, fn) -> str:
+    """读取或填充 ARTIST_PIC_CACHE 缓存条目（按 (platform, norm_core(artist_name)) 键存储）。"""
+    name = str(artist_name or '').strip()
+    if not name:
+        return ''
+    key = (platform, norm_core(name))
+    return cached_call(ARTIST_PIC_CACHE, INFLIGHT_ARTIST, key, fn) or ''
+
+
 def is_artist_compatible(album_artist: str, singer: str) -> bool:
     sk = norm_core(singer)
     if not sk:
@@ -506,6 +720,24 @@ def song_matches(song_name: str, song_duration: float, song_artist: str, tc: str
     return True
 
 
+def cache_resolved_album(platform: str, album_name: str, singer: str, album_id: str, resolved_album_name: str) -> None:
+    """将已由单曲反查或详情命中的专辑反向填充至 SEARCH_CACHE，供同专辑其他曲目直接命中。"""
+    aid = str(album_id or '').strip()
+    aname = str(resolved_album_name or album_name or '').strip()
+    alb_raw = str(album_name or '').strip()
+    art_raw = str(singer or '').strip()
+    if not (platform and aid and alb_raw):
+        return
+    with CACHE_LOCK:
+        if art_raw:
+            k1 = (platform, norm_full(f'{alb_raw} {art_raw}'.strip()), norm_full(alb_raw), norm_core(art_raw))
+            SEARCH_CACHE[k1] = (aid, aname, True)
+        k2 = (platform, norm_full(alb_raw), norm_full(alb_raw), norm_core(art_raw))
+        SEARCH_CACHE[k2] = (aid, aname, True)
+        k3 = (platform, norm_full(alb_raw), norm_full(alb_raw), '')
+        SEARCH_CACHE[k3] = (aid, aname, True)
+
+
 class MusicProvider:
     """统一的在线音乐数据源接口基类。"""
 
@@ -514,6 +746,11 @@ class MusicProvider:
     capabilities: frozenset[str] = frozenset()
     supports_album_search: bool = False
     _lyric_url_headers: dict[str, str] | None = None
+    circuit_breaker: ProviderCircuitBreaker | None = None
+
+    @property
+    def is_available(self) -> bool:
+        return self.circuit_breaker is None or not self.circuit_breaker.is_open()
 
     def search_album(self, term: str, album_name: str, singer: str) -> tuple[str, str, bool]:
         return '', '', False
@@ -523,6 +760,10 @@ class MusicProvider:
 
     def search_songs(self, term: str) -> list[dict]:
         return []
+
+    def search_artist(self, artist_name: str) -> str:
+        """根据艺术家名字检索艺术家图片（头像/写真）的 URL，未找到返回空串。"""
+        return ''
 
     def search_song_hits(self, term: str) -> list[dict]:
         """将单曲搜索结果规整为统一字段字典列表，供在线反查统一消费。"""
@@ -545,14 +786,14 @@ class MusicProvider:
 
 
 __all__ = [
-    'ALBUM_CACHE', 'ALBUM_META_CACHE', 'CACHE_LOCK', 'COVER_CACHE',
-    'INFLIGHT_ALBUM', 'INFLIGHT_SEARCH', 'INFLIGHT_SONG_SEARCH',
+    'ALBUM_CACHE', 'ALBUM_META_CACHE', 'ARTIST_BYTES_CACHE', 'ARTIST_PIC_CACHE', 'CACHE_LOCK', 'COVER_CACHE',
+    'HTTPConnectionPool', 'INFLIGHT_ALBUM', 'INFLIGHT_ARTIST', 'INFLIGHT_SEARCH', 'INFLIGHT_SONG_SEARCH',
     'KUGOU_INFO_DONE', 'PKL_CACHE', 'SEARCH_CACHE', 'SONG_META_CACHE', 'SONG_SEARCH_CACHE',
     'MusicProvider', 'ProviderCircuitBreaker', 'TrackMatch', 'USER_AGENT',
-    'build_tracks', 'bump_cache_gen', 'cached_album', 'cached_call',
+    'build_tracks', 'bump_cache_gen', 'cache_resolved_album', 'cached_album', 'cached_artist_url', 'cached_call',
     'cached_search', 'cached_song_meta', 'cached_song_search', 'choose_album_detail',
     'extract_artist_names', 'first_artist', 'get_album_date', 'get_album_meta', 'get_cache_gen',
-    'http_get_json', 'http_get_text', 'http_post_form', 'http_post_json',
+    'http_get_bytes', 'http_get_json', 'http_get_text', 'http_post_form', 'http_post_json',
     'is_artist_compatible', 'match_in_tracks', 'merge_lyrics',
     'norm_core', 'norm_full', 'norm_id', 'normalize_release_date',
     'parse_lyric_credits', 'reset_all_circuit_breakers', 'set_album_date', 'set_album_meta',

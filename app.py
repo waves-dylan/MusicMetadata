@@ -1,11 +1,10 @@
-"""MusicMetadata — foobar2000 媒体库曲目元数据修复工具（tkinter 主窗口与程序入口）。"""
+"""MusicMetadata — 通用本地音乐库曲目元数据修复工具（支持 MusicBee/Fooyin/Strawberry/AIMP/foobar2000 等）。"""
 
 from __future__ import annotations
 
 import ctypes
 import os
 import queue
-import subprocess
 import sys
 import threading
 import time
@@ -32,7 +31,7 @@ from art_repair import (
     pick_canonical_album_date,
 )
 from cli import build_arg_parser, run_cli
-from dialogs import ConvertFormatDialog, DeleteMetadataDialog, SetMetadataDialog, SourceConfigDialog
+from dialogs import ConvertFormatDialog, DeleteMetadataDialog, FolderManagerDialog, SetMetadataDialog, SourceConfigDialog
 from foobar_library import (
     CORE_TEXT_FIELDS,
     EXTRA_TEXT_FIELDS,
@@ -71,12 +70,25 @@ from track_lookup import (
     TrackMatch,
     clear_caches,
     fetch_cover_bytes,
+    get_fanart_keys,
     get_netease_api_base,
     get_spotify_credentials,
+    get_tadb_api_key,
     parse_source_list,
     resolve_track_metadata,
+    set_fanart_keys,
     set_netease_api_base,
     set_spotify_credentials,
+    set_tadb_api_key,
+)
+from user_config import (
+    get_default_music_folders,
+    has_foobar_env,
+    load_user_config,
+    normalize_folder_list,
+    reveal_in_file_manager,
+    save_user_config,
+    ui_font,
 )
 
 
@@ -166,7 +178,7 @@ def _apply_window_icon(root: tk.Tk) -> tk.PhotoImage | None:
 
 class MainWindow:
     _COLS = ('chk', 'status', 'title', 'artist', 'album', 'track', 'cover', 'tagsync', 'note')
-    _HEADS = ('选择', '综合状态', '歌曲名', '艺术家', '专辑', '音轨号(磁盘/fb)', '封面状态', '缓存/标签检查', '说明 / 结果')
+    _HEADS = ('选择', '综合状态', '歌曲名', '艺术家', '专辑', '音轨号', '封面状态', '标签检查', '说明 / 结果')
     _WIDTHS = (44, 108, 175, 115, 145, 105, 145, 165, 240)
     _PROG_LABELS = {
         'fix_prog': '处理中',
@@ -180,9 +192,11 @@ class MainWindow:
         'QQ音乐优先': ('qq',),
         'Apple/iTunes优先': ('itunes',),
         'MusicBrainz优先': ('mb',),
-        '欧美/国际优先': ('itunes', 'deezer', 'ytmusic', 'lrclib', 'mb', 'spotify'),
+        '欧美/国际优先': ('itunes', 'deezer', 'ytmusic', 'lrclib', 'mb', 'spotify', 'tadb', 'fanart'),
         'YouTube Music优先': ('ytmusic', 'lrclib'),
         'Deezer优先': ('deezer', 'lrclib'),
+        'TheAudioDB优先': ('tadb',),
+        'Fanart.tv优先': ('fanart',),
         '酷狗优先': ('kugou',),
         '咪咕优先': ('migu',),
         '千千优先': ('baidu',),
@@ -195,10 +209,12 @@ class MainWindow:
         self.root.geometry('1220x760')
         self.root.minsize(920, 560)
 
+        self._user_config = load_user_config()
+        saved_folders = normalize_folder_list(self._user_config.get('custom_folders'), existing_only=True)
         self.env = FoobarEnv()
         self.tracks: list[LibraryTrack] = []
         self.visible_tracks: list[LibraryTrack] = []
-        self.custom_folders: list[str] | None = None
+        self.custom_folders: list[str] | None = saved_folders or None
         self.checked_paths: set[str] = set()
         self._busy = False
         self._has_scanned = False
@@ -209,6 +225,7 @@ class MainWindow:
         self.var_track = tk.BooleanVar(value=True)
         self.var_art = tk.BooleanVar(value=True)
         self.var_cover = self.var_art
+        self.var_artist_art = tk.BooleanVar(value=bool(self._user_config.get('enable_artist_art', False)))
         self.var_date = tk.BooleanVar(value=True)
         self.var_albumartist = tk.BooleanVar(value=True)
         self.var_artist = tk.BooleanVar(value=True)
@@ -216,17 +233,34 @@ class MainWindow:
         self.var_genre = tk.BooleanVar(value=True)
         self.var_disc = tk.BooleanVar(value=True)
         self.var_sync = tk.BooleanVar(value=True)
-        self.var_lyrics = tk.BooleanVar(value=False)
-        self.var_lyrics_mode = tk.StringVar(value='auto')
-        self.var_prefer_preset = tk.StringVar(value='默认')
-        self._custom_prefer_sources: tuple[str, ...] = ()
-        self._only_sources: tuple[str, ...] = ()
-        self._skip_sources: tuple[str, ...] = ()
-        self._netease_api: str = ''
+        self.var_lyrics = tk.BooleanVar(value=bool(self._user_config.get('enable_lyrics', False)))
+        saved_lrc_mode = self._user_config.get('lyrics_mode', 'auto')
+        self.var_lyrics_mode = tk.StringVar(value=saved_lrc_mode if saved_lrc_mode in LYRICS_MODES else 'auto')
+        saved_preset = self._user_config.get('prefer_preset', '默认')
+        valid_presets = set(self._PREFER_PRESETS.keys()) | {'自定义'}
+        self.var_prefer_preset = tk.StringVar(value=saved_preset if saved_preset in valid_presets else '默认')
+        self._custom_prefer_sources: tuple[str, ...] = tuple(self._user_config.get('custom_prefer_sources') or ())
+        self._only_sources: tuple[str, ...] = tuple(self._user_config.get('only_sources') or ())
+        self._skip_sources: tuple[str, ...] = tuple(self._user_config.get('skip_sources') or ())
+        self._netease_api: str = str(self._user_config.get('netease_api') or '')
+        if self._netease_api:
+            set_netease_api_base(self._netease_api)
         self._spotify_client_id, self._spotify_client_secret = get_spotify_credentials()
+        self._tadb_api_key: str = str(self._user_config.get('tadb_api_key') or '')
+        if self._tadb_api_key:
+            set_tadb_api_key(self._tadb_api_key)
+        self._fanart_api_key: str = str(self._user_config.get('fanart_api_key') or '')
+        self._fanart_client_key: str = str(self._user_config.get('fanart_client_key') or '')
+        if self._fanart_api_key or self._fanart_client_key:
+            set_fanart_keys(self._fanart_api_key, self._fanart_client_key)
         self.var_only_pending = tk.BooleanVar(value=True)
         self.var_skip_full = tk.BooleanVar(value=True)
-        self.var_env = tk.StringVar(value='未自动扫描媒体库；请点击下方「扫描媒体库」或右上角「选择目录...」开始扫描。')
+        init_env_msg = (
+            f'已加载上次保存的 {len(self.custom_folders)} 个目录；点击「扫描媒体库」开始检查。'
+            if self.custom_folders
+            else '未自动扫描音乐目录；请点击下方「扫描媒体库」或右上角「选择目录...」开始扫描。'
+        )
+        self.var_env = tk.StringVar(value=init_env_msg)
         self.var_summary = tk.StringVar(value='尚未扫描，请点击「扫描媒体库」开始检查。')
         self.var_status = tk.StringVar(value='就绪：点击「扫描媒体库」或「选择目录...」开始扫描')
 
@@ -252,9 +286,9 @@ class MainWindow:
         style = ttk.Style()
         if 'vista' in style.theme_names():
             style.theme_use('vista')
-        style.configure('.', font=('Microsoft YaHei UI', 9))
+        style.configure('.', font=ui_font(9))
         style.configure('Treeview', rowheight=24)
-        style.configure('Treeview.Heading', font=('Microsoft YaHei UI', 9, 'bold'))
+        style.configure('Treeview.Heading', font=ui_font(9, bold=True))
         self.root.configure(bg='#f5f7fa')
 
         outer = ttk.Frame(self.root, padding=12)
@@ -267,9 +301,11 @@ class MainWindow:
         r1.pack(fill='x')
         ttk.Label(r1, textvariable=self.var_env, anchor='w').pack(side='left', fill='x', expand=True)
         self.btn_reset_lib = ttk.Button(r1, text='使用媒体库', command=self._reset_to_library)
+        self.btn_manage_dirs = ttk.Button(r1, text='管理目录...', command=self._manage_custom_folders)
+        self.btn_manage_dirs.pack(side='right', padx=(6, 0))
         self.btn_pick_dir = ttk.Button(r1, text='选择目录...', command=self._pick_custom_folder)
         self.btn_pick_dir.pack(side='right', padx=(6, 0))
-        ttk.Label(top, textvariable=self.var_summary, foreground='#334155', font=('Microsoft YaHei UI', 9, 'bold')).pack(fill='x', pady=(4, 0))
+        ttk.Label(top, textvariable=self.var_summary, foreground='#334155', font=ui_font(9, bold=True)).pack(fill='x', pady=(4, 0))
 
         # 操作按钮栏
         acts = ttk.Frame(outer)
@@ -277,7 +313,7 @@ class MainWindow:
         self.btn_one_click = tk.Button(
             acts, text='一键修复已选项目', command=self._on_one_click,
             bg='#2563eb', fg='#ffffff', activebackground='#1d4ed8', activeforeground='#ffffff',
-            relief='flat', padx=14, pady=5, font=('Microsoft YaHei UI', 10, 'bold'), cursor='hand2',
+            relief='flat', padx=14, pady=5, font=ui_font(10, bold=True), cursor='hand2',
         )
         self.btn_one_click.pack(side='left', padx=(0, 8))
         self.btn_sync_only = ttk.Button(acts, text='仅刷新 foobar 缓存', command=self._on_sync_only)
@@ -334,13 +370,16 @@ class MainWindow:
         opts_misc.pack(fill='x', pady=(4, 0))
         self.chk_sync = ttk.Checkbutton(opts_misc, text='刷新 foobar 缓存', variable=self.var_sync, command=self._on_option_changed)
         self.chk_sync.pack(side='left', padx=(0, 10))
-        self.chk_lyrics = ttk.Checkbutton(opts_misc, text='补全歌词', variable=self.var_lyrics, command=self._on_option_changed)
+        self.chk_artist_art = ttk.Checkbutton(opts_misc, text='获取艺术家图', variable=self.var_artist_art, command=self._on_pref_option_changed)
+        self.chk_artist_art.pack(side='left', padx=(0, 10))
+        self.chk_lyrics = ttk.Checkbutton(opts_misc, text='补全歌词', variable=self.var_lyrics, command=self._on_pref_option_changed)
         self.chk_lyrics.pack(side='left', padx=(0, 4))
         self.cmb_lyrics_mode = ttk.Combobox(
             opts_misc, textvariable=self.var_lyrics_mode,
             values=list(LYRICS_MODES), state='readonly', width=7,
         )
         self.cmb_lyrics_mode.pack(side='left', padx=(0, 10))
+        self.cmb_lyrics_mode.bind('<<ComboboxSelected>>', lambda _e: self._save_user_state())
         ttk.Label(opts_misc, text='音源:').pack(side='left')
         self.cmb_prefer_source = ttk.Combobox(
             opts_misc, textvariable=self.var_prefer_preset,
@@ -348,10 +387,13 @@ class MainWindow:
             state='readonly', width=16,
         )
         self.cmb_prefer_source.pack(side='left', padx=(4, 4))
+        self.cmb_prefer_source.bind('<<ComboboxSelected>>', lambda _e: self._save_user_state())
         self.btn_source_cfg = ttk.Button(opts_misc, text='数据源...', command=self._on_source_config)
         self.btn_source_cfg.pack(side='left', padx=(0, 10))
-        ttk.Checkbutton(opts_misc, text='默认跳过整轨全长', variable=self.var_skip_full, command=self._on_option_changed).pack(side='right')
-        ttk.Checkbutton(opts_misc, text='只显示待处理曲目', variable=self.var_only_pending, command=self._refresh_table).pack(side='right', padx=(0, 12))
+        self.chk_skip_full = ttk.Checkbutton(opts_misc, text='默认跳过整轨全长', variable=self.var_skip_full, command=self._on_option_changed)
+        self.chk_skip_full.pack(side='right')
+        self.chk_only_pending = ttk.Checkbutton(opts_misc, text='只显示待处理曲目', variable=self.var_only_pending, command=self._refresh_table)
+        self.chk_only_pending.pack(side='right', padx=(0, 12))
 
         # 底部固定进度与状态栏（先按 side='bottom' 布局，确保窗口较矮时不被分割区挤压隐藏）
         bottom_bar = ttk.Frame(outer)
@@ -388,7 +430,7 @@ class MainWindow:
         log_frame = ttk.Frame(paned)
         self.log_box = tk.Text(
             log_frame, height=8, bg='#0f172a', fg='#e2e8f0', relief='flat',
-            font=('Consolas', 9), state='disabled', wrap='word',
+            font=ui_font(9, mono=True), state='disabled', wrap='word',
         )
         l_sb = ttk.Scrollbar(log_frame, orient='vertical', command=self.log_box.yview)
         self.log_box.configure(yscrollcommand=l_sb.set)
@@ -414,6 +456,7 @@ class MainWindow:
         return FixOptions(
             enable_track=self.var_track.get(),
             enable_art=self.var_art.get(),
+            enable_artist_art=self.var_artist_art.get(),
             enable_tags=any_tag,
             enable_extra_tags=any_extra,
             enable_date=self.var_date.get(),
@@ -430,6 +473,9 @@ class MainWindow:
             netease_api=self._netease_api or None,
             spotify_client_id=self._spotify_client_id or None,
             spotify_client_secret=self._spotify_client_secret or None,
+            tadb_api_key=self._tadb_api_key or None,
+            fanart_api_key=self._fanart_api_key or None,
+            fanart_client_key=self._fanart_client_key or None,
             enable_sync=self.var_sync.get(),
             sync_only=sync_only,
         )
@@ -448,14 +494,20 @@ class MainWindow:
         self.btn_one_click.configure(state=state, bg='#93c5fd' if busy else '#2563eb')
         for b in (
             self.btn_sync_only, self.btn_set_meta, self.btn_delete_meta, self.btn_convert,
-            self.btn_rescan, self.btn_pick_dir, self.btn_reset_lib,
+            self.btn_rescan, self.btn_pick_dir, self.btn_manage_dirs, self.btn_reset_lib,
             self.btn_toggle_all, self.btn_fields_all, self.btn_fields_none,
-            self.chk_sync, self.chk_lyrics, self.btn_source_cfg,
+            self.chk_sync, self.chk_artist_art, self.chk_lyrics, self.btn_source_cfg,
+            self.chk_skip_full, self.chk_only_pending,
             *self.field_buttons.values(),
         ):
             b.configure(state=state)
         for cmb in (self.cmb_lyrics_mode, self.cmb_prefer_source):
             cmb.configure(state='disabled' if busy else 'readonly')
+        if busy:
+            try:
+                self.root.focus_set()
+            except Exception:
+                pass
         if text:
             self.var_status.set(text)
 
@@ -504,47 +556,119 @@ class MainWindow:
         if self.root.winfo_exists():
             self.root.after(40, self._poll_queue)
 
+    def _save_user_state(self):
+        cfg = dict(self._user_config)
+        cfg['custom_folders'] = list(self.custom_folders or [])
+        cfg['enable_artist_art'] = bool(self.var_artist_art.get())
+        cfg['enable_lyrics'] = bool(self.var_lyrics.get())
+        cfg['lyrics_mode'] = self.var_lyrics_mode.get() or 'auto'
+        cfg['prefer_preset'] = self.var_prefer_preset.get() or '默认'
+        cfg['custom_prefer_sources'] = list(self._custom_prefer_sources)
+        cfg['only_sources'] = list(self._only_sources)
+        cfg['skip_sources'] = list(self._skip_sources)
+        cfg['netease_api'] = self._netease_api
+        cfg['tadb_api_key'] = self._tadb_api_key
+        cfg['fanart_api_key'] = self._fanart_api_key
+        cfg['fanart_client_key'] = self._fanart_client_key
+        self._user_config = cfg
+        save_user_config(cfg)
+
+    def _apply_player_mode(self, is_fb: bool):
+        if is_fb:
+            if self.btn_sync_only.winfo_manager() != 'pack':
+                self.btn_sync_only.pack(side='left', padx=(0, 6), before=self.btn_set_meta)
+            if self.chk_sync.winfo_manager() != 'pack':
+                self.chk_sync.pack(side='left', padx=(0, 10), before=self.chk_artist_art)
+            self.tree.heading('track', text='音轨号(磁盘/fb)')
+            self.tree.heading('tagsync', text='缓存/标签检查')
+        else:
+            if self.btn_sync_only.winfo_manager() == 'pack':
+                self.btn_sync_only.pack_forget()
+            if self.chk_sync.winfo_manager() == 'pack':
+                self.chk_sync.pack_forget()
+            self.tree.heading('track', text='音轨号')
+            self.tree.heading('tagsync', text='标签检查')
+
+        if self.custom_folders and self.env.library_folders:
+            if self.btn_reset_lib.winfo_manager() != 'pack':
+                self.btn_reset_lib.pack(side='right', padx=(6, 0), before=self.btn_manage_dirs)
+        elif self.btn_reset_lib.winfo_manager() == 'pack':
+            self.btn_reset_lib.pack_forget()
+
     def _pick_custom_folder(self):
         folder = filedialog.askdirectory(title='选择要扫描的音乐文件夹')
         if folder:
             self.custom_folders = [os.path.abspath(folder)]
-            self.btn_reset_lib.pack(side='right', padx=(6, 0))
+            self._save_user_state()
             self.start_scan()
+
+    def _manage_custom_folders(self):
+        dlg = FolderManagerDialog(self.root, self.custom_folders or [])
+        self._last_folder_dialog = dlg
+        self.root.wait_window(dlg.top)
+        if dlg.result is None:
+            return
+        self.custom_folders = dlg.result or None
+        self._save_user_state()
+        self.start_scan()
 
     def _reset_to_library(self):
         self.custom_folders = None
-        self.btn_reset_lib.pack_forget()
+        self._save_user_state()
+        if self.btn_reset_lib.winfo_manager() == 'pack':
+            self.btn_reset_lib.pack_forget()
         self.start_scan()
 
     def start_scan(self):
         if self._busy:
             return
-        self._set_busy(True, '正在扫描媒体库元数据、封面与 foobar 缓存...')
+        self._set_busy(True, '正在扫描音乐目录、封面与标签元数据...')
         self._show_progress(True, 0, 0)
-        custom = self.custom_folders
+        custom = list(self.custom_folders) if self.custom_folders else None
 
         def _worker():
-            env = detect_foobar_env()
-            tracks = scan_library(env, folders=custom, progress_cb=lambda i, t, f: self._ev_q.put(('scan_prog', (i, t, f))), include_art_scan=True)
-            self._ev_q.put(('scan_done', (env, tracks)))
+            try:
+                env = detect_foobar_env()
+                fallback_folders: list[str] | None = None
+                scan_folders = custom
+                if scan_folders is None and not env.library_folders:
+                    fallback_folders = get_default_music_folders() or None
+                    scan_folders = fallback_folders
+                tracks = scan_library(
+                    env,
+                    folders=scan_folders,
+                    progress_cb=lambda i, t, f: self._ev_q.put(('scan_prog', (i, t, f))),
+                    include_art_scan=True,
+                )
+                self._ev_q.put(('scan_done', (env, tracks, fallback_folders)))
+            except Exception as exc:
+                import traceback
+                self._ev_q.put(('log', f'扫描发生异常: {exc}\n{traceback.format_exc()}'))
+                self._ev_q.put(('scan_done', (detect_foobar_env(), [], None)))
 
         threading.Thread(target=_worker, daemon=True).start()
 
-    def _on_scan_finished(self, env: FoobarEnv, tracks: list[LibraryTrack]):
+    def _on_scan_finished(self, env: FoobarEnv, tracks: list[LibraryTrack], fallback_folders: list[str] | None = None):
         self.env, self.tracks = env, tracks
         self._has_scanned = True
         self.btn_rescan.configure(text='重新扫描')
         self._show_progress(False)
         self._set_busy(False)
+        is_fb = has_foobar_env(env)
+        self._apply_player_mode(is_fb)
+
         if self.custom_folders:
-            self.var_env.set('当前扫描自定义目录：' + '；'.join(self.custom_folders))
+            prefix = '当前扫描自定义目录：' if is_fb else '当前扫描目录：'
+            self.var_env.set(prefix + '；'.join(self.custom_folders))
         elif env.library_folders or env.unavailable_folders:
             fb_state = '运行中' if get_running_foobar_exes() else '未运行'
             fdesc = '；'.join(env.library_folders) if env.library_folders else '无'
             wdesc = f'（不可访问：{"；".join(env.unavailable_folders)}）' if env.unavailable_folders else ''
             self.var_env.set(f'已识别 foobar2000 媒体库（{len(env.library_folders)} 个目录，foobar {fb_state}）：{fdesc}{wdesc}')
+        elif fallback_folders:
+            self.var_env.set('未检测到 foobar2000，已自动扫描系统音乐目录：' + '；'.join(fallback_folders))
         else:
-            self.var_env.set('未自动检测到 foobar2000 媒体库目录，请点击右侧“选择目录...”手动指定。')
+            self.var_env.set('未检测到 foobar2000 或默认音乐目录，请点击右上角「选择目录...」或「管理目录...」指定文件夹。')
 
         opts = self._current_options()
         self.checked_paths = {tr.path for tr in tracks if default_checked(tr, self.var_skip_full.get(), opts)}
@@ -557,8 +681,13 @@ class MainWindow:
         datec = sum(1 for t in tracks if t.needs_date and not (self.var_skip_full.get() and t.is_full_album) and not t.is_temp_duplicate)
         tagc = sum(1 for t in tracks if t.needs_tag_fix or ((bool(t.missing_core_fields) or t.needs_date or t.needs_extra_tags) and not (self.var_skip_full.get() and t.is_full_album) and not t.is_temp_duplicate))
         stale = sum(1 for t in tracks if t.needs_foobar_sync)
-        self._log(f'扫描完成：共 {len(tracks)} 首 | 缺音轨 {miss} 首 | 封面待修 {cov} 首 (目录 cover.jpg {dcov} 个) | 标签待补 {tagc} 首 (缺日期 {datec} 首) | foobar 缓存待刷新 {stale} 首。')
-        self.var_status.set('扫描完成，可按需勾选模块后点击「一键修复已选项目」或「仅刷新 foobar 缓存」')
+        fb_log = f' | foobar 缓存待刷新 {stale} 首' if (is_fb or stale > 0) else ''
+        self._log(f'扫描完成：共 {len(tracks)} 首 | 缺音轨 {miss} 首 | 封面待修 {cov} 首 (目录 cover.jpg {dcov} 个) | 标签待补 {tagc} 首 (缺日期 {datec} 首){fb_log}。')
+        self.var_status.set(
+            '扫描完成，可按需勾选模块后点击「一键修复已选项目」或「仅刷新 foobar 缓存」'
+            if is_fb
+            else '扫描完成，可按需勾选模块后点击「一键修复已选项目」'
+        )
 
     def _update_summary(self):
         miss = sum(1 for t in self.tracks if t.needs_tracknumber and not t.is_full_album and not t.is_temp_duplicate)
@@ -568,17 +697,28 @@ class MainWindow:
         tagc = sum(1 for t in self.tracks if t.needs_tag_fix or ((bool(t.missing_core_fields) or t.needs_date or t.needs_extra_tags) and not t.is_full_album and not t.is_temp_duplicate))
         lrcc = sum(1 for t in self.tracks if t.needs_lyrics and not t.is_full_album and not t.is_temp_duplicate)
         stale = sum(1 for t in self.tracks if t.needs_foobar_sync)
+        inc_art = self.var_artist_art.get()
+        artist_cnt = sum(1 for t in self.tracks if t.needs_artist_art and not t.is_full_album and not t.is_temp_duplicate)
+        dart = len({t.folder for t in self.tracks if t.folder_artist_action in ('create', 'rewrite', 'remove')})
         inc_lrc = self.var_lyrics.get()
-        ok_cnt = sum(1 for t in self.tracks if not track_has_pending_work(t, True, True, True, True, True, enable_extra_tags=True, enable_lyrics=inc_lrc))
+        ok_cnt = sum(1 for t in self.tracks if not track_has_pending_work(t, True, True, True, True, True, enable_extra_tags=True, enable_lyrics=inc_lrc, enable_artist_art=inc_art))
         parts = [
             f'共 {len(self.tracks)} 首', f'缺音轨号 {miss}',
             f'封面待修 {cov}' + (f' (目录cover {dcov})' if dcov else ''),
             f'标签待补 {tagc}' + (f' (缺日期 {datec})' if datec else ''),
         ]
+        if inc_art:
+            parts.append(f'缺艺术家图 {artist_cnt}' + (f' (目录artist {dart})' if dart else ''))
         if inc_lrc:
             parts.append(f'缺歌词 {lrcc}')
-        parts.extend([f'foobar待刷新 {stale}', f'正常 {ok_cnt}'])
+        if has_foobar_env(self.env) or stale > 0:
+            parts.append(f'foobar待刷新 {stale}')
+        parts.append(f'正常 {ok_cnt}')
         self.var_summary.set('  |  '.join(parts))
+
+    def _on_pref_option_changed(self):
+        self._save_user_state()
+        self._on_option_changed()
 
     def _on_option_changed(self):
         opts = self._current_options()
@@ -613,6 +753,7 @@ class MainWindow:
                     enable_extra_tags=(opts.enable_tags and opts.enable_extra_tags),
                     enabled_tag_fields=allowed,
                     enable_lyrics=opts.enable_lyrics,
+                    enable_artist_art=opts.enable_artist_art,
                 )
             ]
         else:
@@ -647,7 +788,7 @@ class MainWindow:
     def _on_tree_double_click(self, event):
         iid = self.tree.identify_row(event.y)
         if iid and os.path.exists(iid):
-            subprocess.Popen(['explorer', '/select,', os.path.normpath(iid)])
+            reveal_in_file_manager(iid)
 
     def _toggle_select_all(self):
         if not self.visible_tracks:
@@ -669,14 +810,19 @@ class MainWindow:
 
     def _run_batch_task(self, prefix: str, targets: list[LibraryTrack], opts, executor, busy_label: str):
         def _worker():
-            summary = executor(
-                self.env, targets, opts,
-                progress_cb=lambda i, t, n: self._ev_q.put((f'{prefix}_prog', (i, t, n))),
-                row_cb=lambda p, d: self._ev_q.put((f'{prefix}_row', (p, d))),
-                log_cb=lambda m: self._ev_q.put(('log', m)),
-                is_cancelled_cb=lambda: self._cancel_flag,
-            )
-            self._ev_q.put((f'{prefix}_done', summary))
+            try:
+                summary = executor(
+                    self.env, targets, opts,
+                    progress_cb=lambda i, t, n: self._ev_q.put((f'{prefix}_prog', (i, t, n))),
+                    row_cb=lambda p, d: self._ev_q.put((f'{prefix}_row', (p, d))),
+                    log_cb=lambda m: self._ev_q.put(('log', m)),
+                    is_cancelled_cb=lambda: self._cancel_flag,
+                )
+                self._ev_q.put((f'{prefix}_done', summary))
+            except Exception as exc:
+                import traceback
+                self._ev_q.put(('log', f'执行任务异常中断: {exc}\n{traceback.format_exc()}'))
+                self._ev_q.put((f'{prefix}_done', {'error': str(exc), 'cancelled': False}))
 
         self._start_worker(busy_label, len(targets), _worker)
 
@@ -697,7 +843,7 @@ class MainWindow:
                 f'当前没有已勾选的曲目。\n如需对正常曲目{action_desc}，请先取消勾选“只显示待处理曲目”，再勾选目标曲目。',
             )
             return
-        dlg = dialog_cls(self.root, targets, default_sync=self.var_sync.get())
+        dlg = dialog_cls(self.root, targets, default_sync=self.var_sync.get(), has_foobar=has_foobar_env(self.env))
         setattr(self, attr_name, dlg)
         self.root.wait_window(dlg.top)
         if dlg.result is not None:
@@ -722,7 +868,7 @@ class MainWindow:
             vals[8] = payload['source_note']
         self.tree.item(path, values=vals, tags=(payload.get('color', 'info'),))
 
-    def _sync_track_from_info(self, tr: LibraryTrack, new_info: dict, *, pop_tags=(), cover_deleted: bool = False, synced: bool = False):
+    def _sync_track_from_info(self, tr: LibraryTrack, new_info: dict, *, pop_tags=(), cover_deleted: bool = False, artist_cover_deleted: bool = False, synced: bool = False):
         for f in ('title', 'artist', 'albumartist', 'album', 'date', 'composer', 'performer', 'genre', 'comment'):
             setattr(tr, f, new_info.get(f) or '')
         tr.has_163_key = bool(new_info.get('has_163_key'))
@@ -745,8 +891,14 @@ class MainWindow:
             tr.cover_status = '缺封面'
             tr.cover_reasons = ['no-cover-source']
             tr.target_pic_bytes = None
+        if artist_cover_deleted:
+            tr.has_artist_art = False
+            tr.needs_artist_art = True
+            tr.artist_status = '缺艺术家图'
+            tr.artist_reasons = ['no-artist-art']
+            tr.target_artist_bytes = None
         self._recompute_track_missing(tr)
-        if synced:
+        if synced or not has_foobar_env(self.env):
             tr.needs_foobar_sync, tr.foobar_stale_reasons = False, []
         else:
             tr.needs_foobar_sync = True
@@ -794,6 +946,9 @@ class MainWindow:
             netease_api=self._netease_api,
             spotify_client_id=self._spotify_client_id,
             spotify_client_secret=self._spotify_client_secret,
+            tadb_api_key=self._tadb_api_key,
+            fanart_api_key=self._fanart_api_key,
+            fanart_client_key=self._fanart_client_key,
         )
         self._last_source_dialog = dlg
         self.root.wait_window(dlg.top)
@@ -805,9 +960,15 @@ class MainWindow:
         self._netease_api = dlg.result['netease_api']
         self._spotify_client_id = dlg.result['spotify_client_id']
         self._spotify_client_secret = dlg.result['spotify_client_secret']
+        self._tadb_api_key = dlg.result.get('tadb_api_key', '')
+        self._fanart_api_key = dlg.result.get('fanart_api_key', '')
+        self._fanart_client_key = dlg.result.get('fanart_client_key', '')
         set_netease_api_base(self._netease_api)
         set_spotify_credentials(self._spotify_client_id, self._spotify_client_secret)
+        set_tadb_api_key(self._tadb_api_key)
+        set_fanart_keys(self._fanart_api_key, self._fanart_client_key)
         self.var_prefer_preset.set('自定义' if (self._custom_prefer_sources or self._only_sources or self._skip_sources) else '默认')
+        self._save_user_state()
         sp_state = '已配置' if (self._spotify_client_id and self._spotify_client_secret) else '未配置(仅缓存)'
         self._log(
             f"已更新数据源配置：优先={','.join(self._custom_prefer_sources) or '默认'} | "
@@ -830,6 +991,9 @@ class MainWindow:
                     tr.needs_tracknumber = False
                 if payload.get('fixed_cover'):
                     tr.needs_cover_fix, tr.needs_cover_online, tr.cover_status, tr.cover_reasons = False, False, '正常', []
+                if payload.get('fixed_artist_art'):
+                    tr.has_artist_art = True
+                    tr.needs_artist_art, tr.artist_status, tr.artist_reasons = False, '正常', []
                 if payload.get('fixed_lyrics'):
                     tr.has_lyrics = True
                     tr.needs_lyrics = False
@@ -863,7 +1027,7 @@ class MainWindow:
                 if payload.get('current_track'):
                     tr.disk_tracknumber = str(payload['current_track'])
                     tr.disk_track_int = int(payload['current_track'])
-                if not any(k in payload for k in ('fixed_track', 'fixed_disc', 'fixed_cover', 'fixed_tags', 'fixed_lyrics', 'fixed_sync', 'fixed_folder_cover')):
+                if not any(k in payload for k in ('fixed_track', 'fixed_disc', 'fixed_cover', 'fixed_artist_art', 'fixed_tags', 'fixed_lyrics', 'fixed_sync', 'fixed_folder_cover')):
                     tr.needs_tracknumber = tr.needs_foobar_sync = False
                 if not tr.needs_tracknumber and not tr.needs_foobar_sync:
                     tr.status = STATUS_OK
@@ -872,15 +1036,24 @@ class MainWindow:
         self._update_tree_row(path, tr, payload, default_tn='-')
 
     def _on_fix_finished(self, summary: dict):
+        if summary.get('error'):
+            self._finish_worker()
+            err_msg = f"修复过程发生异常中断：{summary['error']}"
+            self._log(err_msg)
+            self.var_status.set(err_msg)
+            messagebox.showerror('执行出错', err_msg)
+            return
         opts = self._current_options()
         for tr in self.tracks:
             if tr.folder_plan is not None:
                 tr.folder_cover_action = tr.folder_plan.cover_action
+                tr.folder_artist_action = tr.folder_plan.artist_action
                 if not track_has_pending_work(
                     tr, opts.enable_track, opts.enable_art, opts.enable_tags, opts.enable_sync,
                     self.var_skip_full.get(), enable_extra_tags=opts.enable_extra_tags,
                     enabled_tag_fields=opts.active_tag_fields(),
                     enable_lyrics=opts.enable_lyrics,
+                    enable_artist_art=opts.enable_artist_art,
                 ):
                     self.checked_paths.discard(tr.path)
         self._finish_worker()
@@ -890,12 +1063,14 @@ class MainWindow:
         else:
             date_part = f"（含日期 {summary['date_fixed']}）" if summary.get('date_fixed') else ''
             lrc_part = f" / 歌词 {summary['lyrics_fixed']}" if summary.get('lyrics_fixed') else ''
+            art_part = f" / 艺术家图 {summary['artist_fixed']}" if summary.get('artist_fixed') else ''
+            folder_art_part = f"，目录 artist.jpg {summary['folder_artist_ok']} 个" if summary.get('folder_artist_ok') else ''
             date_miss = f"、未匹配日期 {summary['date_unmatched']} 首" if summary.get('date_unmatched') else ''
             lrc_miss = f"、未匹配歌词 {summary['lyrics_unmatched']} 首" if summary.get('lyrics_unmatched') else ''
             msg = (
-                f"修复完成：文件写入 {summary['written_ok']} 首（封面 {summary['cover_fixed']} / 标签 {summary['tags_fixed']}{date_part}{lrc_part}），"
-                f"目录 cover.jpg {summary['folder_cover_ok']} 个，纯缓存同步 {summary['synced_stale']} 首，"
-                f"未匹配音轨 {summary['unmatched']} 首{date_miss}{lrc_miss}，失败 {summary['written_fail'] + summary['folder_cover_fail']} 项。"
+                f"修复完成：文件写入 {summary['written_ok']} 首（封面 {summary['cover_fixed']}{art_part} / 标签 {summary['tags_fixed']}{date_part}{lrc_part}），"
+                f"目录 cover.jpg {summary['folder_cover_ok']} 个{folder_art_part}，纯缓存同步 {summary['synced_stale']} 首，"
+                f"未匹配音轨 {summary['unmatched']} 首{date_miss}{lrc_miss}，失败 {summary['written_fail'] + summary['folder_cover_fail'] + summary.get('folder_artist_fail', 0)} 项。"
             )
         if summary.get('cancelled'):
             msg = '已手动停止。' + msg
@@ -947,6 +1122,12 @@ class MainWindow:
 
     def _on_set_finished(self, summary: dict):
         self._finish_worker()
+        if summary.get('error'):
+            err_msg = f"设置元数据发生异常中断：{summary['error']}"
+            self._log(err_msg)
+            self.var_status.set(err_msg)
+            messagebox.showerror('执行出错', err_msg)
+            return
         prefix = '[预演] 设置完成' if summary.get('dry_run') else '设置完成'
         msg = f"{prefix}：修改文件 {summary['set_ok']} 首，跳过 {summary['set_skipped']} 首，失败 {summary['set_fail']} 项。"
         if summary.get('cancelled'):
@@ -986,29 +1167,34 @@ class MainWindow:
 
     def _start_delete(self, targets: list[LibraryTrack], del_opts: DeleteOptions):
         def _worker():
-            summary = execute_deletions(
-                self.env, targets, del_opts,
-                progress_cb=lambda i, t, n: self._ev_q.put(('del_prog', (i, t, n))),
-                row_cb=lambda p, d: self._ev_q.put(('del_row', (p, d))),
-                log_cb=lambda m: self._ev_q.put(('log', m)),
-                is_cancelled_cb=lambda: self._cancel_flag,
-            )
-            reanalyzed: dict[str, FolderArtPlan] = {}
-            if not del_opts.dry_run and (summary.get('deleted_ok', 0) > 0 or summary.get('folder_cover_deleted', 0) > 0):
-                mod_set = set(summary.get('modified_paths') or ())
-                touched_folders = {
-                    tr.folder for tr in targets
-                    if tr.folder and (tr.path in mod_set or (del_opts.delete_folder_cover and 'cover' in del_opts.fields))
-                }
-                for folder in touched_folders:
-                    clean_paths = [
-                        t.path for t in self.tracks
-                        if t.folder == folder and not t.is_temp_duplicate and t.status != STATUS_ERROR
-                    ]
-                    if clean_paths:
-                        reanalyzed[folder] = analyze_folder_art_and_tags(folder, clean_paths)
-            summary['reanalyzed_folders'] = reanalyzed
-            self._ev_q.put(('del_done', summary))
+            try:
+                summary = execute_deletions(
+                    self.env, targets, del_opts,
+                    progress_cb=lambda i, t, n: self._ev_q.put(('del_prog', (i, t, n))),
+                    row_cb=lambda p, d: self._ev_q.put(('del_row', (p, d))),
+                    log_cb=lambda m: self._ev_q.put(('log', m)),
+                    is_cancelled_cb=lambda: self._cancel_flag,
+                )
+                reanalyzed: dict[str, FolderArtPlan] = {}
+                if not del_opts.dry_run and (summary.get('deleted_ok', 0) > 0 or summary.get('folder_cover_deleted', 0) > 0):
+                    mod_set = set(summary.get('modified_paths') or ())
+                    touched_folders = {
+                        tr.folder for tr in targets
+                        if tr.folder and (tr.path in mod_set or (del_opts.delete_folder_cover and 'cover' in del_opts.fields))
+                    }
+                    for folder in touched_folders:
+                        clean_paths = [
+                            t.path for t in self.tracks
+                            if t.folder == folder and not t.is_temp_duplicate and t.status != STATUS_ERROR
+                        ]
+                        if clean_paths:
+                            reanalyzed[folder] = analyze_folder_art_and_tags(folder, clean_paths)
+                summary['reanalyzed_folders'] = reanalyzed
+                self._ev_q.put(('del_done', summary))
+            except Exception as exc:
+                import traceback
+                self._ev_q.put(('log', f'删除任务异常中断: {exc}\n{traceback.format_exc()}'))
+                self._ev_q.put(('del_done', {'error': str(exc), 'cancelled': False}))
 
         self._start_worker(f'正在删除已选曲目元数据 (共 {len(targets)} 首)...', len(targets), _worker)
 
@@ -1023,12 +1209,20 @@ class MainWindow:
                     tr, payload['new_info'],
                     pop_tags=deleted_fields,
                     cover_deleted=('cover' in deleted_fields),
+                    artist_cover_deleted=('artist_cover' in deleted_fields),
                     synced=bool(payload.get('synced')),
                 )
                 self.checked_paths.discard(path)
         self._update_tree_row(path, tr, payload)
 
     def _on_delete_finished(self, summary: dict):
+        if summary.get('error'):
+            self._finish_worker()
+            err_msg = f"删除元数据发生异常中断：{summary['error']}"
+            self._log(err_msg)
+            self.var_status.set(err_msg)
+            messagebox.showerror('执行出错', err_msg)
+            return
         reanalyzed: dict[str, FolderArtPlan] = summary.get('reanalyzed_folders') or {}
         if reanalyzed:
             for tr in self.tracks:
@@ -1062,9 +1256,10 @@ class MainWindow:
 
         prefix = '[预演] 删除完成' if summary.get('dry_run') else '删除完成'
         fc_part = f"，删除目录 cover.jpg {summary['folder_cover_deleted']} 个" if summary.get('folder_cover_deleted') else ''
+        fa_part = f"，删除目录 artist.jpg {summary['folder_artist_deleted']} 个" if summary.get('folder_artist_deleted') else ''
         msg = (
-            f"{prefix}：修改文件 {summary['deleted_ok']} 首{fc_part}，"
-            f"跳过 {summary['deleted_skipped']} 首，失败 {summary['deleted_fail'] + summary['folder_cover_fail']} 项。"
+            f"{prefix}：修改文件 {summary['deleted_ok']} 首{fc_part}{fa_part}，"
+            f"跳过 {summary['deleted_skipped']} 首，失败 {summary['deleted_fail'] + summary['folder_cover_fail'] + summary.get('folder_artist_fail', 0)} 项。"
         )
         if summary.get('cancelled'):
             msg = '已手动停止。' + msg

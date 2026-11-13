@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from providers.base import (
     MusicProvider,
+    ProviderCircuitBreaker,
     cached_song_search,
     extract_artist_names,
     http_get_json,
@@ -18,6 +19,7 @@ _MIGU_HEADERS = {
     'Referer': 'http://music.migu.cn/',
     'Accept': 'application/json, text/plain, */*',
 }
+_MIGU_CB = ProviderCircuitBreaker(threshold=5)
 
 
 class MiGuProvider(MusicProvider):
@@ -26,6 +28,7 @@ class MiGuProvider(MusicProvider):
     capabilities = frozenset({'cover', 'title', 'artist', 'album', 'lyrics'})
     supports_album_search = False
     _lyric_url_headers = {'User-Agent': _MIGU_UA, 'Referer': 'http://music.migu.cn/'}
+    circuit_breaker = _MIGU_CB
 
     def search_songs(self, term: str) -> list[dict]:
         def _fetch():

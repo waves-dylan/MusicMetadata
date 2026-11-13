@@ -6,9 +6,11 @@ import re
 
 from providers.base import (
     MusicProvider,
+    ProviderCircuitBreaker,
     build_tracks,
     bump_cache_gen,
     cached_album,
+    cached_artist_url,
     cached_search,
     cached_song_meta,
     cached_song_search,
@@ -16,6 +18,7 @@ from providers.base import (
     extract_artist_names,
     http_get_json,
     merge_lyrics,
+    norm_core,
     normalize_release_date,
     parse_lyric_credits,
     set_album_date,
@@ -25,6 +28,7 @@ from providers.base import (
 
 _FULL_ALBUM_RE = re.compile(r'(专辑全长|full\s*album)', re.IGNORECASE)
 _NETEASE_API_BASE = ''
+_NETEASE_CB = ProviderCircuitBreaker(threshold=5)
 
 
 def set_netease_api_base(api_base: str) -> str:
@@ -61,6 +65,7 @@ class NetEaseProvider(MusicProvider):
     label = '网易云音乐'
     capabilities = frozenset({'track', 'date', 'cover', 'title', 'artist', 'album', 'albumartist', 'composer', 'discnumber', 'lyrics'})
     supports_album_search = True
+    circuit_breaker = _NETEASE_CB
 
     @property
     def api_base(self) -> str:
@@ -129,6 +134,40 @@ class NetEaseProvider(MusicProvider):
                 )
             return ((d or {}).get('result') or {}).get('songs') or []
         return cached_song_search('netease_song', self.api_base or 'default', term, _fetch)
+
+    def search_artist(self, artist_name: str) -> str:
+        name = str(artist_name or '').strip()
+        if not name:
+            return ''
+
+        def _fetch() -> str:
+            if self.api_base:
+                d = http_get_json(f'{self.api_base}/search', params={'keywords': name, 'type': 100, 'limit': 5})
+            else:
+                d = http_get_json(
+                    'https://music.163.com/api/search/get',
+                    params={'s': name, 'type': 100, 'limit': 5, 'offset': 0},
+                    headers=self._headers(),
+                )
+            artists = ((d or {}).get('result') or {}).get('artists') or []
+            if not isinstance(artists, list) or not artists:
+                return ''
+            sk = norm_core(name)
+            for a in artists:
+                if not isinstance(a, dict):
+                    continue
+                if sk and norm_core(a.get('name') or '') == sk:
+                    pic = str(a.get('picUrl') or a.get('img1v1Url') or '').strip()
+                    if pic:
+                        return pic.replace('http://', 'https://')
+            first = artists[0]
+            if isinstance(first, dict):
+                pic = str(first.get('picUrl') or first.get('img1v1Url') or '').strip()
+                if pic:
+                    return pic.replace('http://', 'https://')
+            return ''
+
+        return cached_artist_url('netease', name, _fetch)
 
     def search_song_hits(self, term: str) -> list[dict]:
         hits: list[dict] = []

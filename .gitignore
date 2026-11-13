@@ -5,6 +5,7 @@ __pycache__/
 
 # PyInstaller build artifacts (keep packaged MusicMetadata.exe as requested)
 build/
+dist/
 *.manifest
 
 # Virtual environments

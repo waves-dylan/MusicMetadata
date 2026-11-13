@@ -2,7 +2,7 @@
 
 [![python](https://img.shields.io/badge/python-3-blue)](https://www.python.org/) [![platform](https://img.shields.io/badge/platform-Windows-blue)](https://github.com/waves-dylan/MusicMetadata) [![license](https://img.shields.io/github/license/waves-dylan/MusicMetadata)](https://github.com/waves-dylan/MusicMetadata/blob/main/LICENSE) [![stars](https://img.shields.io/github/stars/waves-dylan/MusicMetadata?style=flat&label=stars)](https://github.com/waves-dylan/MusicMetadata) [![forks](https://img.shields.io/github/forks/waves-dylan/MusicMetadata?style=flat&label=forks)](https://github.com/waves-dylan/MusicMetadata/forks) [![watchers](https://img.shields.io/github/watchers/waves-dylan/MusicMetadata?style=flat&label=watchers)](https://github.com/waves-dylan/MusicMetadata) [![downloads](https://img.shields.io/github/downloads/waves-dylan/MusicMetadata/total?style=flat&label=downloads)](https://github.com/waves-dylan/MusicMetadata/releases)
 
-统一集成 **foobar2000 媒体库歌曲元数据检查、获取与缓存刷新**、**封面规范化修复**（含单专辑 `cover.jpg` 与分组标签补全）、**海内外多平台音轨与双语歌词联网补全**、**批量手工标签设置 / 局部清除** 与 **音频格式转换** 的手动媒体库修复工具（GUI + CLI）。
+统一集成 **本地音乐库元数据检查与批量补全**（通用适配 MusicBee、MediaMonkey、AIMP、JRiver、Strawberry、Dopamine、Fooyin、foobar2000 等管理目录，并支持 foobar2000 `metadb.sqlite` 缓存核对与热重载）、**封面与艺术家写真规范化修复**（含单专辑 `cover.jpg` / `artist.jpg` 与分组标签补全）、**海内外多平台音轨与双语歌词联网补全**、**批量手工标签设置 / 局部清除** 与 **音频格式转换** 的桌面媒体库修复工具（GUI + CLI）。
 
 ## 目录
 
@@ -15,19 +15,25 @@
 
 ## 核心能力
 
-1. **foobar2000 媒体库全字段核对与刷新**
-   - 自动解析 `library-v2.0\folders` 与 `metadb.sqlite`，不仅检测文件大小或修改时间差异，还会比对 `title`、`artist`、`album`、`albumartist`、`date`、`composer`、`performer`、`genre`、`tracknumber`、`discnumber`、`comment` 等全字段以及内嵌/外置歌词状态。
-   - 刷新缓存时兼容 `exFAT` / `FAT32` 的 2 秒修改时间粒度，并可触发运行中的 `foobar2000` 自动重载磁盘元数据。
-2. **封面修复与缺图联网补全**
-   - 自动按专辑分组投票选出代表封面：单专辑目录生成或规范化 1000px 内 `cover.jpg`，多专辑混放目录不写外置图并安全撤回误放的 `cover.jpg`（备份为 `disabled-cover.jpg.bak`）。
-   - 修复缺封面、损坏图、非前置封面 (`type != 3`)、多图重复、MIME 不符、超大图（`>4MP` 或 `>2MB` 压缩至 1400px 内 JPEG）以及同专辑封面不一致问题；本地无可用封面时自动联网下载高清专辑封面。
+1. **通用本地音乐库核对与可选 foobar2000 深度集成**
+   - 自动扫描任意本地音乐目录（支持通过 GUI **「选择目录...」** / **「管理目录...」** 或 CLI `--folder` 多次指定多目录，并自动记住上次配置；未配置且未安装 foobar2000 时回退扫描系统 `~/Music` 目录）。
+   - 检测到 foobar2000 时额外解析 `library-v2.0\folders` 与 `metadb.sqlite`，比对 `title`、`artist`、`album`、`albumartist`、`date`、`composer`、`performer`、`genre`、`tracknumber`、`discnumber`、`comment` 等全字段及歌词状态；未检测到 foobar2000 时自动隐藏专属缓存控件并使用通用界面文案。
+   - 写入后兼容 `exFAT` / `FAT32` 的 2 秒修改时间粒度推进时间戳，帮助监听目录变化的本地播放器感知文件更新，并在 foobar2000 运行时触发自动重载。
+2. **封面与艺术家图片规范化修复与缺图联网补全**
+   - **专辑正面封面 (Cover Front, Type 3)**：按专辑分组投票选出代表封面，单专辑目录生成或规范化 1000px 内 `cover.jpg`，多专辑混放目录不写外置图并安全撤回误放的 `cover.jpg`（备份为 `disabled-cover.jpg.bak`）。修复缺封面、损坏图、非前置封面 (`type != 3`)、多图重复、MIME 不符、超大图（`>4MP` 或 `>2MB` 压缩至 1400px 内 JPEG）以及同专辑封面不一致问题。
+   - **艺术家图片 (Artist Art, Type 8)**：支持联网获取高清艺人头像/写真，统一规范化为最大边 ≤1000px 的优质 JPEG（单曲体积增量控制在 50~200KB），与正面封面独立共存内嵌至 FLAC、MP3、WAV、AIFF、OGG、Opus 容器；单专辑目录自动生成规范外置 `artist.jpg`，多艺术家混放目录自动跳过并撤回备份为 `disabled-artist.jpg.bak`。
 3. **跨平台合并获取歌曲元数据、双语歌词与安全文件名回填**
-   - 优先读取内嵌网易云 `163 key`、文件名歌曲 ID 与同目录 `.pkl` 缓存，结合安全文件名解析（保留 `1973 - James Blunt`、`2002年的第一场雪`、`7 Years`、`Anti-Hero` 等歌名，不误删非前缀数字）回填缺失的 `title` 与 `artist`，再跨多平台合并补全缺失的**封面、发布日期 (`date`)、专辑艺术家 (`albumartist`)、艺术家 (`artist`)、作曲 (`composer`)、流派 (`genre`)、音轨号 (`tracknumber`)、碟片编号 (`discnumber`) 与 LRC 歌词**。
+   - 优先读取内嵌网易云 `163 key`、文件名歌曲 ID 与同目录 `.pkl` 缓存，结合安全文件名解析（保留 `1973 - James Blunt`、`2002年的第一场雪`、`7 Years`、`Anti-Hero` 等歌名，不误删非前缀数字）回填缺失的 `title` 与 `artist`，再跨多平台合并补全缺失的**封面、艺术家写真、发布日期 (`date`)、专辑艺术家 (`albumartist`)、艺术家 (`artist`)、作曲 (`composer`)、流派 (`genre`)、音轨号 (`tracknumber`)、碟片编号 (`discnumber`) 与 LRC 歌词**。
    - 支持 **原文 + 翻译双语 LRC 时间轴逐行合并**，支持 `auto`（`wav`/`ape`/`wv` 自动外挂 `.lrc`，其余容器内嵌）、`embed`、`lrc`、`both` 四种写入模式；写入外置 `.lrc` 时自动补充 `[ti:]` / `[ar:]` / `[al:]` 头信息。
    - 默认保护原有非空标签与网易云 `163 key(Don't modify):...` 数据不被误覆盖。
-4. **单次原子写入、手工设值、选择性删标与格式转换**
-   - 同曲目的标签、封面、歌词、音轨号与碟片号修改在 `.musictmp` 临时副本上一次完成并回读校验后原子替换；文件被占用时通过 Windows Restart Manager 提示占用进程，默认跳过整轨全长文件与下载临时副本。
-   - 支持通过弹窗或 `--set` 批量覆写标准字段或自定义标签；支持通过 `--delete` 或弹窗按类别选择性删除部分元数据；支持通过 `ffmpeg`（搭配 `mutagen` 封面/标签/歌词补偿校验与同名 `.lrc` 复制）安全转换音频格式。
+4. **高性能就地写入、并发架构与网络加速**
+   - **极速就地写入与安全退避**：改写标签与封面时优先零拷贝就地更新（性能提升 5~20 倍），遭遇文件占用或异常时自动安全退避至原子临时副本 (`.musictmp`) 替换，并通过 Windows Restart Manager 检测占用进程。
+   - **长连接池与流式解压**：内置 `HTTPConnectionPool` 实现 HTTP Keep-Alive 连接复用、空闲连接回收、SSL 上下文共享与 Gzip / Deflate 流式解压，大幅降低网络检索 RTT。
+   - **多线程并行并发**：图片批量拉取（12 线程并发调度）与音轨写入（自适应 CPU 核心数最高 8 线程并发），大幅缩短大规模曲库修复耗时。
+   - **反向专辑与艺人多级缓存**：跨曲目复用解析结果，同专辑或同艺人后续曲目命中内存缓存直接复用；在线源支持失败熔断机制 (`ProviderCircuitBreaker`)，避免单点故障导致整体流程卡死。
+5. **批量手工设值、选择性删标与格式转换**
+   - 支持通过弹窗或 `--set` 批量覆写标准字段或自定义标签；支持通过 `--delete` 或弹窗按类别选择性删除部分元数据（含 `artist_cover` 与 `--delete-folder-artist` 联动删除同目录 `artist.jpg`）。
+   - 支持通过 `ffmpeg`（搭配 `mutagen` 封面/标签/歌词补偿校验与同名 `.lrc` 复制）安全转换音频格式。
 
 ## 支持格式与数据源
 
@@ -35,9 +41,11 @@
   - **格式转换目标 (`--convert`)**：`flac`、`mp3`、`m4a`、`ogg`、`opus`、`wav`、`aiff`（需系统 `PATH` 中可调用 `ffmpeg`）。
 - **在线数据源 (`providers/`)**：
   - **主流程数据源 (`PRIMARY_PROVIDERS`)**：`netease`（网易云音乐，支持官方接口与 `--netease-api` 自定义反代）、`qq`（QQ 音乐，支持桌面端 `musicu.fcg` 搜索兜底与双语歌词合并）、`itunes`（Apple Music / iTunes）、`mb`（MusicBrainz）。
-  - **扩展国内数据源 (`EXTENDED_CN_PROVIDERS`)**：`kugou`（酷狗音乐在线搜索、专辑信息与 Base64 歌词）、`migu`（咪咕音乐搜索与歌词）、`baidu`（千千音乐 MD5 签名搜索与歌词）。
+  - **扩展国内数据源 (`EXTENDED_CN_PROVIDERS`)**：`kugou`（酷狗音乐在线搜索、专辑信息、Base64 歌词与歌手头像）、`migu`（咪咕音乐搜索与歌词）、`baidu`（千千音乐 MD5 签名搜索与歌词）。
   - **扩展国际数据源 (`EXTENDED_INTL_PROVIDERS`)**：
-    - `deezer`（Deezer 免 Key 公开专辑/单曲/流派与高清封面）
+    - `tadb`（TheAudioDB 开放音乐数据库，内置公开 Key 即开即用，支持专辑、曲目、流派与高清艺人写真）
+    - `fanart`（Fanart.tv 社区高清视觉库，内置项目 Key 即开即用，通过 MBID 直连匹配 1000px 正方形高赞艺人头像与背景）
+    - `deezer`（Deezer 免 Key 公开专辑/单曲/流派与高清封面/艺人图）
     - `ytmusic`（YouTube Music 免登录 InnerTube 搜索、封面与歌词）
     - `lrclib`（LRCLIB 开源同步 LRC 歌词补全）
     - `spotify`（默认免 Key 仅用 Embed 页面读取 `.pkl` 专辑；配置 `--spotify-client-id` / `--spotify-client-secret` 或环境变量 `SPOTIFY_CLIENT_ID` / `SPOTIFY_CLIENT_SECRET` 后启用官方 Web API 搜索与 Track ID 直查）
@@ -47,16 +55,20 @@
 
 直接双击运行 [MusicMetadata.exe](MusicMetadata.exe)（Windows 无控制台窗口版本）或运行 `python app.py`：
 
-1. **扫描**：启动后不会自动改写或扫描，点击 **「扫描媒体库」**（或右上角 **「选择目录...」** 指定文件夹）开始检查。
+1. **扫描与目录管理**：
+   - 点击 **「扫描媒体库」** 开始检查；点击右上角 **「选择目录...」** 或 **「管理目录...」**。
+   - 在 **「管理目录...」** 弹窗中可直观添加多音乐目录、一键添加系统默认音乐目录（`~/Music`）、删除或清空目录，所有配置跨平台持久化保存。
+   - 勾选 **「只显示待处理曲目」** 可快速过滤列表，隐藏无异常曲目，专注处理待修复项。
 2. **勾选修复模块与音源**：
    - 在 **「修复项选择」** 栏按需勾选 **封面**、**日期**、**专辑艺术家**、**艺术家**、**作曲**、**流派**、**音轨号**、**碟片编号**。
-   - 在辅助选项勾选 **「刷新 foobar 缓存」**、**「补全歌词」**（模式可选 `auto` / `embed` / `lrc` / `both`）。
-   - 在 **「音源」** 下拉框选择预设，包括：`默认`、`网易云优先`、`QQ音乐优先`、`Apple/iTunes优先`、`MusicBrainz优先`、`欧美/国际优先`（优先按 `Apple/iTunes → Deezer → YouTube Music → LRCLIB → MusicBrainz → Spotify` 查询）、`YouTube Music优先`、`Deezer优先`、`酷狗优先`、`咪咕优先`、`千千优先` 与 `自定义`；点击 **「数据源...」** 可自定义优先源、仅用源、跳过源、自定义网易云 API 地址与可选 Spotify API 凭据。
-3. **执行修复或缓存刷新**：点击 **「一键修复已选项目」** 执行选中模块；点击 **「仅刷新 foobar 缓存」** 仅推进修改时间并触发 foobar2000 重载（不修改文件标签和封面）。
+   - 在辅助选项中按需勾选 **「获取艺术家图」**（内嵌 Picture Type = 8 艺术家写真并生成单专辑 `artist.jpg`）与 **「补全歌词」**（模式可选 `auto` / `embed` / `lrc` / `both`）；若环境检测到 foobar2000，还会显示 **「刷新 foobar 缓存」**。
+   - 在 **「音源」** 下拉框选择预设，包括：`默认`、`网易云优先`、`QQ音乐优先`、`Apple/iTunes优先`、`MusicBrainz优先`、`欧美/国际优先`（优先按 `Apple/iTunes → TheAudioDB → Fanart.tv → Deezer → YouTube Music → LRCLIB → MusicBrainz → Spotify` 查询）、`YouTube Music优先`、`Deezer优先`、`TheAudioDB优先`、`Fanart.tv优先`、`酷狗优先`、`咪咕优先`、`千千优先` 与 `自定义`。
+   - 点击 **「数据源...」** 可自定义优先源、仅用源、跳过源、网易云自定义反代地址，以及配置 Spotify、TheAudioDB（可选）、Fanart.tv Project / Client Key（可选）。
+3. **执行修复**：点击 **「一键修复已选项目」** 执行选中模块；检测到 foobar2000 时也可点击 **「仅刷新 foobar 缓存」** 仅推进修改时间并触发 foobar2000 重载（不修改文件标签和封面）。
 4. **独立批量工具**（针对列表中已勾选曲目）：
    - **「设置标签...」**：批量添加/覆写多个标准字段（`title`、`artist`、`album`、`albumartist`、`date`、`composer`、`performer`、`genre`、`tracknumber`、`discnumber`、`comment`、`lyrics`）或自定义标签名，默认保留网易云 `163 key`，支持仅预演。
-   - **「删除部分元数据...」**：独立弹窗（所有类别**默认不勾选**，非预演需二次确认），可按类别批量清除内嵌封面、标题、艺术家、专辑艺术家、专辑、日期、作曲、表演者、流派、音轨号、碟片编号、歌词（可选是否保留外置 `.lrc`）与注释（默认保留网易云 `163 key`，可选删除同目录 `cover.jpg`）。
-   - **「格式转换...」**：调用 `ffmpeg` 批量转码为目标格式，支持“覆盖已存在目标文件”与“校验成功后删除源文件”确认开关，自动保留元数据、封面与外置 `.lrc`。
+   - **「删除部分元数据...」**：独立弹窗（所有类别**默认不勾选**，非预演需二次确认），可按类别批量清除内嵌封面、封面-艺术家 (`artist_cover`)、标题、艺术家、专辑艺术家、专辑、日期、作曲、表演者、流派、音轨号、碟片编号、歌词（可选是否保留外置 `.lrc`）与注释（默认保留网易云 `163 key`，支持联动删除同目录 `cover.jpg` 与 `artist.jpg`）。
+   - **「格式转换...」**：调用 `ffmpeg` 批量转码为目标格式，支持“覆盖已存在目标文件”与“校验成功后删除源文件”确认开关，自动保留元数据、封面、艺术家图与外置 `.lrc`。
 
 ## 命令行参考
 
@@ -66,16 +78,19 @@
   - 仅扫描预览待修复项（不修改文件）：`python app.py --dry-run`
   - 仅检查并刷新 foobar2000 元数据缓存：`python app.py --sync-only`
   - 一键执行默认自动修复：`python app.py --auto`
-  - 自由组合跳过开关：`--no-track`、`--no-art`、`--no-tags`、`--no-extra-tags`、`--no-date`、`--no-albumartist`、`--no-artist`、`--no-composer`、`--no-genre`、`--no-disc`、`--no-lyrics`、`--no-sync`、`--folder "F:\Music"`、`--include-full-album`
+  - 自由组合跳过开关与多目录扫描：`--no-track`、`--no-art`、`--no-artist-art`、`--no-tags`、`--no-extra-tags`、`--no-date`、`--no-albumartist`、`--no-artist`、`--no-composer`、`--no-genre`、`--no-disc`、`--no-lyrics`、`--no-sync`、`--folder "F:\Music"`（可多次传入以指定多目录）、`--include-full-album`
+- **艺术家图片（封面-艺术家）与外置 artist.jpg**
+  - 开启艺术家图片获取与内嵌/生成（默认关闭，按需启用）：`python app.py --auto --artist-art`
+  - 规格说明：自动从网易云、QQ 音乐、TheAudioDB、Fanart.tv、Deezer、酷狗等在线数据源检索艺术家写真/头像，统一规范化为最大边不超过 1000px，以质量 100（JPEG 格式）优先输出，单曲文件体积增量控制在 50~200KB 范围；支持在 FLAC、MP3、WAV、AIFF、OGG、Opus 等支持多图的容器内嵌 Picture Type = 8 (`Artist/performer`) 帧，与正面封面 (Type = 3) 互不覆盖、无损共存；在单专辑目录自动输出规范外置 `artist.jpg`（多艺术家混放目录安全撤回备份）。
 - **歌词与数据源控制**
   - 开启歌词补全（默认 `auto`）：`python app.py --auto --lyrics`
   - 指定歌词模式（`auto` / `embed` / `lrc` / `both`）：`python app.py --auto --lyrics --lyrics-mode both`
   - 仅保存外置 `.lrc`（等价于 `--lyrics --lyrics-mode lrc`）：`python app.py --auto --external-lrc`
   - 控制国内外数据源与可选凭据：
     - 国内优先：`python app.py --auto --prefer netease,qq,kugou --skip-source mb`
-    - 欧美/国际优先：`python app.py --auto --prefer itunes,deezer,ytmusic,lrclib,mb,spotify --lyrics`
+    - 欧美/国际优先：`python app.py --auto --prefer itunes,tadb,fanart,deezer,ytmusic,lrclib,mb,spotify --lyrics`
     - 指定音源 + 自定义网易云 API：`python app.py --auto --source netease,migu,baidu --netease-api http://127.0.0.1:3000`
-    - 启用 Spotify Web API：`python app.py --auto --prefer spotify,itunes --spotify-client-id <ID> --spotify-client-secret <SECRET>`（或设置环境变量 `SPOTIFY_CLIENT_ID`、`SPOTIFY_CLIENT_SECRET`）
+    - 启用 Spotify / TheAudioDB / Fanart.tv 自定义 Key：`python app.py --auto --prefer fanart,tadb,spotify --tadb-api-key <KEY> --fanart-api-key <KEY> --fanart-client-key <KEY>`（注：TheAudioDB 与 Fanart.tv 默认已内置可用 Key，开箱即用；Spotify 可传入 `--spotify-client-id` / `--spotify-client-secret`）
 - **手工设置标签 (`--set`)**
   - `python app.py --set genre=Electronic --set date=2024 --set CUSTOM_MOOD=Chill --folder "F:\Music"`
   - 可配合 `--dry-run`、`--no-protect-163`、`--no-sync`、`--include-full-album`
@@ -83,9 +98,9 @@
   - `python app.py --convert flac --folder "F:\Music"`
   - 可配合 `--force`（覆盖已存在目标文件）、`--delete-source`（校验成功后删除源文件）、`--dry-run`、`--no-sync`
 - **删除部分元数据 (`--delete`)**
-  - `python app.py --delete composer,performer,lyrics,comment --folder "F:\Music"`
-  - 可选类别：`cover`、`title`、`artist`、`albumartist`、`album`、`date`、`composer`、`performer`、`genre`、`tracknumber`、`discnumber`、`comment`、`lyrics`
-  - 可配合 `--dry-run`、`--delete-folder-cover`、`--no-delete-lrc`、`--no-protect-163`、`--no-sync`、`--include-full-album`
+  - `python app.py --delete composer,performer,lyrics,comment,artist_cover --folder "F:\Music"`
+  - 可选类别：`cover`、`artist_cover`、`title`、`artist`、`albumartist`、`album`、`date`、`composer`、`performer`、`genre`、`tracknumber`、`discnumber`、`comment`、`lyrics`
+  - 可配合 `--dry-run`、`--delete-folder-cover`、`--delete-folder-artist`、`--no-delete-lrc`、`--no-protect-163`、`--no-sync`、`--include-full-album`
 
 ## 源码运行、测试与打包
 
@@ -109,25 +124,29 @@
 
 ```text
 MusicMetadata/
-├── app.py               # tkinter 主窗口 GUI 与程序总入口
-├── runner.py            # 修复、删除、设值与格式转换批量执行引擎与并发调度
-├── dialogs.py           # 删除元数据、手工设值、格式转换与数据源配置弹窗
+├── app.py               # tkinter 主窗口 GUI 与程序总入口（含视图过滤与目录管理联动）
+├── user_config.py       # 跨平台配置持久化、系统音乐目录探测与界面辅助
+├── runner.py            # 批量修复、删除、设值与格式转换并发执行引擎
+├── dialogs.py           # 目录管理、删除元数据、手工设值、格式转换与数据源配置弹窗
 ├── cli.py               # 命令行参数解析与 CLI 批量执行入口
-├── foobar_library.py    # foobar2000 媒体库与 metadb.sqlite 扫描、状态判定及刷新同步
-├── art_repair.py        # 专辑封面规范化、分组标签修复、批量设值/删除与格式转换协调
-├── tag_io.py            # 容器识别、AES-128 163 key 解密、原子读写、LRC 与 ffmpeg 转码
-├── track_lookup.py      # 多平台查询调度、字段合并、.pkl 缓存读取与封面下载
-├── providers/           # 模块化在线音源插件
+├── library_scan.py      # 通用本地音乐库目录扫描、LibraryTrack 模型与时间戳刷新
+├── foobar_library.py    # foobar2000 媒体库探测、metadb.sqlite 核对及兼容导出层
+├── art_repair.py        # 专辑封面/艺术家写真规范化、分组标签修复、批量设值/删除与格式转换协调
+├── tag_io.py            # 容器识别、AES-128 163 key 解密、就地极速写入/临时副本退避、LRC 与转码
+├── track_lookup.py      # 多平台查询调度、字段合并、.pkl 缓存读取与封面/艺术家图下载
+├── providers/           # 模块化在线音源插件与网络基础设施
 │   ├── __init__.py      # 数据源注册表、别名标准化与优先级编排
-│   ├── base.py          # MusicProvider / TrackMatch 接口与 HTTP 通用工具
+│   ├── base.py          # MusicProvider 接口、HTTP 长连接池、解压缩、熔断器与多级缓存
 │   ├── netease.py       # 网易云音乐 (支持官方接口 / 自定义反代)
 │   ├── qqmusic.py       # QQ 音乐 (y.qq.com + musicu.fcg + 双语歌词)
 │   ├── itunes.py        # Apple Music / iTunes
 │   ├── musicbrainz.py   # MusicBrainz
-│   ├── kugou.py         # 酷狗音乐
+│   ├── kugou.py         # 酷狗音乐 (在线搜索、专辑信息、Base64 歌词与歌手头像)
 │   ├── migu.py          # 咪咕音乐
 │   ├── baidu.py         # 千千音乐
-│   ├── deezer.py        # Deezer
+│   ├── deezer.py        # Deezer (专辑/单曲/流派与封面/艺人图)
+│   ├── theaudiodb.py    # TheAudioDB (开放音乐库与艺人写真)
+│   ├── fanart.py        # Fanart.tv (社区高清正方形头像与背景)
 │   ├── ytmusic.py       # YouTube Music
 │   ├── lrclib.py        # LRCLIB (同步/纯文本歌词)
 │   ├── spotify.py       # Spotify (Web API + Embed 兜底)
@@ -137,7 +156,8 @@ MusicMetadata/
 │   ├── test_tag_io.py
 │   ├── test_art_repair.py
 │   ├── test_providers_lookup.py
-│   └── test_cli_gui.py
+│   ├── test_cli_gui.py
+│   └── test_online_perf_optimizations.py
 ├── MusicMetadata.spec   # PyInstaller 单文件打包配置
 ├── MusicMetadata.exe    # Windows 单文件可执行程序
 └── requirements.txt     # 最小运行依赖清单

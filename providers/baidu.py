@@ -7,6 +7,7 @@ import time
 
 from providers.base import (
     MusicProvider,
+    ProviderCircuitBreaker,
     cached_song_search,
     extract_artist_names,
     http_get_json,
@@ -29,12 +30,16 @@ def sign_qianqian_params(params: dict[str, str], *, timestamp: str | None = None
     return signed
 
 
+_BAIDU_CB = ProviderCircuitBreaker(threshold=5)
+
+
 class BaiduProvider(MusicProvider):
     id = 'baidu'
     label = '千千音乐'
     capabilities = frozenset({'cover', 'title', 'artist', 'album', 'lyrics'})
     supports_album_search = False
     _lyric_url_headers = {'Referer': 'https://music.91q.com/player'}
+    circuit_breaker = _BAIDU_CB
 
     def search_songs(self, term: str) -> list[dict]:
         def _fetch():

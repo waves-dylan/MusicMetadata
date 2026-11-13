@@ -9,8 +9,8 @@ import re
 import time
 import urllib.request
 
-from art_repair import EMBED_MAX_SIDE, normalize_jpeg, sniff_image
-from foobar_library import LibraryTrack
+from art_repair import ARTIST_MAX_SIDE, EMBED_MAX_SIDE, normalize_artist_jpeg, normalize_jpeg, sniff_image
+from library_scan import LibraryTrack
 from providers import (
     ONLINE_PROVIDERS,
     PRIMARY_PROVIDERS,
@@ -18,8 +18,11 @@ from providers import (
     PROVIDER_LABELS,
     TrackMatch,
     deezer_provider,
+    fanart_provider,
+    get_fanart_keys,
     get_netease_api_base,
     get_spotify_credentials,
+    get_tadb_api_key,
     has_spotify_credentials,
     kugou_provider,
     lrclib_provider,
@@ -27,20 +30,27 @@ from providers import (
     parse_source_list,
     qq_provider,
     resolve_provider_order,
+    set_fanart_keys,
     set_netease_api_base,
     set_spotify_credentials,
+    set_tadb_api_key,
+    tadb_provider,
     ytmusic_provider,
 )
 from providers.base import (
+    ARTIST_BYTES_CACHE,
     CACHE_LOCK,
     COVER_CACHE,
     PKL_CACHE,
     USER_AGENT,
+    _VA_ARTISTS,
     bump_cache_gen,
+    cache_resolved_album,
     extract_artist_names,
     first_artist,
     get_album_date,
     get_album_meta,
+    http_get_bytes,
     match_in_tracks,
     norm_core,
     normalize_release_date,
@@ -63,7 +73,7 @@ def clear_caches() -> None:
     reset_all_circuit_breakers()
 
 
-def fetch_cover_bytes(cover_url: str, timeout: int = 15) -> bytes | None:
+def fetch_cover_bytes(cover_url: str, timeout: int = 10) -> bytes | None:
     """下载在线封面图并规范化为 JPEG 字节；内置 URL 内存缓存。"""
     url = str(cover_url or '').strip()
     if not url or not url.startswith('http'):
@@ -72,14 +82,80 @@ def fetch_cover_bytes(cover_url: str, timeout: int = 15) -> bytes | None:
         if url in COVER_CACHE:
             return COVER_CACHE[url]
     try:
-        req = urllib.request.Request(url, headers={'User-Agent': USER_AGENT})
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            raw = resp.read()
+        raw = http_get_bytes(url, timeout=timeout)
         if not raw or not sniff_image(raw):
             return None
         jpg = normalize_jpeg(raw, EMBED_MAX_SIDE) or raw
         with CACHE_LOCK:
             COVER_CACHE[url] = jpg
+        return jpg
+    except Exception:
+        return None
+
+
+def resolve_artist_pic_url(
+    artist_name: str,
+    *,
+    prefer_sources: tuple[str, ...] | list[str] | None = None,
+    only_sources: set[str] | frozenset[str] | tuple[str, ...] | list[str] | None = None,
+    skip_sources: set[str] | frozenset[str] | tuple[str, ...] | list[str] | None = None,
+) -> str:
+    """根据艺术家名字在线检索艺术家头像/写真 URL（遍历按偏好排序的各音乐源）。"""
+    name = first_artist(artist_name) or str(artist_name or '').strip()
+    if not name or norm_core(name) in _VA_ARTISTS:
+        return ''
+    primary_order, extended_order = resolve_provider_order(
+        prefer_sources=prefer_sources,
+        only_sources=only_sources,
+        skip_sources=skip_sources,
+    )
+    for plat in primary_order + extended_order:
+        prov = PROVIDERS.get(plat)
+        if prov and hasattr(prov, 'search_artist'):
+            try:
+                url = prov.search_artist(name)
+                if url:
+                    return url
+            except Exception:
+                continue
+    return ''
+
+
+def fetch_artist_bytes(
+    artist_name: str = '',
+    *,
+    artist_url: str = '',
+    prefer_sources: tuple[str, ...] | list[str] | None = None,
+    only_sources: set[str] | frozenset[str] | tuple[str, ...] | list[str] | None = None,
+    skip_sources: set[str] | frozenset[str] | tuple[str, ...] | list[str] | None = None,
+    timeout: int = 15,
+) -> bytes | None:
+    """下载在线艺术家图片并规范化为 800px JPEG 字节；内置 URL 与艺术家名字内存缓存。"""
+    url = str(artist_url or '').strip()
+    name = first_artist(artist_name) or str(artist_name or '').strip()
+    if not url:
+        if not name or norm_core(name) in _VA_ARTISTS:
+            return None
+        with CACHE_LOCK:
+            if name in ARTIST_BYTES_CACHE:
+                return ARTIST_BYTES_CACHE[name]
+        url = resolve_artist_pic_url(
+            name, prefer_sources=prefer_sources, only_sources=only_sources, skip_sources=skip_sources,
+        )
+        if not url:
+            return None
+    with CACHE_LOCK:
+        if url in ARTIST_BYTES_CACHE:
+            return ARTIST_BYTES_CACHE[url]
+    try:
+        raw = http_get_bytes(url, timeout=timeout)
+        if not raw or not sniff_image(raw):
+            return None
+        jpg = normalize_artist_jpeg(raw, ARTIST_MAX_SIDE) or raw
+        with CACHE_LOCK:
+            ARTIST_BYTES_CACHE[url] = jpg
+            if name:
+                ARTIST_BYTES_CACHE[name] = jpg
         return jpg
     except Exception:
         return None
@@ -240,7 +316,7 @@ def _find_pkl_item(track: LibraryTrack, ident: str) -> dict | None:
 # ==================== 匹配构造与跨平台聚合 ====================
 _TEXT_MERGE_FIELDS = (
     'album_name', 'release_date', 'title', 'artist', 'albumartist',
-    'composer', 'genre', 'cover_url', 'lyrics',
+    'composer', 'genre', 'cover_url', 'artist_pic_url', 'lyrics',
 )
 
 _PLAT_CAPABILITIES: dict[str, set[str]] = {
@@ -286,6 +362,7 @@ def _make_match(
         composer=str(overrides.get('composer') or tr.get('composer') or ''),
         genre=str(overrides.get('genre') or tr.get('genre') or alb_meta.get('genre') or ''),
         cover_url=str(overrides.get('cover_url') or tr.get('cover_url') or alb_meta.get('cover_url') or ''),
+        artist_pic_url=str(overrides.get('artist_pic_url') or tr.get('artist_pic_url') or alb_meta.get('artist_pic_url') or ''),
         lyrics=str(overrides.get('lyrics') or ''),
     )
 
@@ -383,6 +460,8 @@ def _search_song_and_resolve_album(
                     m = match_in_tracks(tracks, title, duration, sid)
                     if m and (need_track or not need_date or rdate):
                         cand = _make_match(plat, aid, m, len(tracks), f'{label}(单曲反查)', alb_name, release_date=rdate, **cov_kw)
+                        if dummy.album or alb_name:
+                            cache_resolved_album(plat, dummy.album or alb_name, dummy.artist or sart, aid, alb_name)
                         return _enrich_song_credits(cand, plat, str(m.get('id') or sid), dummy, need_extra=need_extra, need_lyrics=need_lyrics)
                     can_fb = rdate or (plat == 'netease' and (cov or need_lyrics)) or (plat == 'qq' and need_lyrics) or (plat in ('deezer', 'ytmusic', 'spotify') and (cov or need_lyrics))
                     if not need_track and can_fb and date_fallback is None:
@@ -399,6 +478,8 @@ def _search_song_and_resolve_album(
                     m = match_in_tracks(tracks, title, duration, sid)
                     if m:
                         cand = _make_match('kugou', aid, m, len(tracks), '酷狗音乐(单曲反查)', alb_name, cover_url=cov)
+                        if dummy.album or alb_name:
+                            cache_resolved_album('kugou', dummy.album or alb_name, dummy.artist or sart, aid, alb_name)
                         return _enrich_song_credits(cand, 'kugou', sid, dummy, need_extra=need_extra, need_lyrics=need_lyrics, title=stitle, duration=sdur)
                 rdate = get_album_date('kugou', aid) if (plat == 'kugou' and aid) else ''
                 cand = TrackMatch(None, source=f'{label}(单曲搜索)', album_name=alb_name, release_date=rdate, title=stitle, artist=sart, cover_url=cov)
@@ -603,7 +684,7 @@ def _resolve_metadata_core(
         terms = [f'{album} {artist}'.strip(), album] if artist else [album]
         for plat in order:
             prov = PROVIDERS.get(plat)
-            if plat in skip_plats or not prov or not prov.supports_album_search:
+            if plat in skip_plats or not prov or not prov.supports_album_search or not prov.is_available:
                 continue
             if plat == 'mb' and not allow_mb:
                 continue
@@ -643,6 +724,14 @@ def _resolve_metadata_core(
             return album_fallback
 
     # 5. 单曲反查兜底（支持按偏好顺序查找单曲及歌词/封面）
+    # 若调用仅是为了补充可选附加字段（如 composer/genre/discnumber），在专辑未命中时无需进行全平台单曲搜索
+    if not need_track and not need_date and not need_cover and not need_core and not need_lyrics:
+        if album_fallback is not None:
+            return album_fallback
+        if track_fallback is not None:
+            return track_fallback
+        return TrackMatch(None, reason='未在在线平台匹配到附加元数据')
+
     song_order = tuple(p for p in order if p != 'mb')
     song_match = _search_song_and_resolve_album(
         title, artist, duration, track,
@@ -705,6 +794,7 @@ def resolve_track_metadata(
     need_track: bool = True,
     need_date: bool = True,
     need_cover: bool = False,
+    need_artist_art: bool = False,
     need_core: bool = False,
     need_extra: bool = False,
     need_lyrics: bool = False,
@@ -772,10 +862,20 @@ def resolve_track_metadata(
                 tried.add(pid)
                 break
 
-        enrich_order = primary_order + extended_order
+        # 仅缺失附加标签（如 composer/genre）时，只尝试主平台（避免轮询全部国际扩展源造成网络阻塞）
+        if rem_extra and not (rem_date or rem_cover or rem_core or rem_lyrics) and not prefer_sources:
+            enrich_order = tuple(primary_order)
+        elif rem_lyrics and not (rem_date or rem_cover or rem_core or rem_extra) and not prefer_sources:
+            enrich_order = tuple(p for p in (primary_order + extended_order) if 'lyrics' in _PLAT_CAPABILITIES.get(p, set()))
+        else:
+            enrich_order = primary_order + extended_order
+
         all_enabled = set(enrich_order)
         for plat in enrich_order:
             if plat in tried:
+                continue
+            prov = PROVIDERS.get(plat)
+            if not prov or not prov.is_available:
                 continue
             rem = _remaining_needs(
                 res, track, need_date=need_date, need_cover=need_cover, need_core=need_core,
@@ -803,6 +903,20 @@ def resolve_track_metadata(
                 plat_order=(plat,),
             )
             _merge_match(res, extra_res)
+            # 若全部所需字段均已补齐，立即退出补充轮询
+            now_rem = _remaining_needs(
+                res, track, need_date=need_date, need_cover=need_cover, need_core=need_core,
+                need_extra=need_extra, need_lyrics=need_lyrics, need_fields=need_fields,
+            )
+            if not any(now_rem.values()):
+                break
+
+    if (need_artist_art or (need_fields and 'artist_cover' in need_fields)) and not res.artist_pic_url:
+        art_target = res.albumartist or res.artist or track.albumartist or track.artist or clues.get('inferred_artist') or ''
+        if art_target:
+            res.artist_pic_url = resolve_artist_pic_url(
+                art_target, prefer_sources=prefer_sources, only_sources=only_sources, skip_sources=skip_sources,
+            )
 
     return res
 

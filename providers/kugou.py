@@ -8,12 +8,15 @@ from providers.base import (
     CACHE_LOCK,
     KUGOU_INFO_DONE,
     MusicProvider,
+    ProviderCircuitBreaker,
     build_tracks,
     cached_album,
+    cached_artist_url,
     cached_song_meta,
     cached_song_search,
     get_album_meta,
     http_get_json,
+    norm_core,
     normalize_release_date,
     parse_lyric_credits,
     set_album_meta,
@@ -21,11 +24,15 @@ from providers.base import (
 )
 
 
+_KUGOU_CB = ProviderCircuitBreaker(threshold=5)
+
+
 class KugouProvider(MusicProvider):
     id = 'kugou'
     label = '酷狗音乐'
     capabilities = frozenset({'track', 'date', 'cover', 'title', 'artist', 'album', 'albumartist', 'lyrics'})
     supports_album_search = False
+    circuit_breaker = _KUGOU_CB
 
     def get_album_info(self, album_id: str) -> dict:
         aid = str(album_id or '').strip()
@@ -93,6 +100,36 @@ class KugouProvider(MusicProvider):
             info = (d.get('data') or {}).get('info') or []
             return [x for x in info if isinstance(x, dict)]
         return cached_song_search('kugou_song', 'default', term, _fetch)
+
+    def search_artist(self, artist_name: str) -> str:
+        name = str(artist_name or '').strip()
+        if not name:
+            return ''
+
+        def _fetch() -> str:
+            d = http_get_json('http://mobilecdn.kugou.com/api/v3/search/singer', params={'keyword': name, 'pagesize': 5})
+            singers = (d or {}).get('data') if isinstance(d, dict) else []
+            if not isinstance(singers, list) or not singers:
+                return ''
+            sk = norm_core(name)
+            sid = None
+            for s in singers:
+                if not isinstance(s, dict):
+                    continue
+                if sk and norm_core(s.get('singername') or '') == sk:
+                    sid = s.get('singerid')
+                    break
+            if sid is None and isinstance(singers[0], dict):
+                sid = singers[0].get('singerid')
+            if not sid:
+                return ''
+            info_d = http_get_json('http://mobilecdn.kugou.com/api/v3/singer/info', params={'singerid': sid})
+            imgurl = str(((info_d or {}).get('data') or {}).get('imgurl') or '').strip()
+            if imgurl:
+                return imgurl.replace('{size}', '1000')
+            return ''
+
+        return cached_artist_url('kugou', name, _fetch)
 
     def search_song_hits(self, term: str) -> list[dict]:
         hits: list[dict] = []

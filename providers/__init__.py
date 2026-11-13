@@ -5,8 +5,9 @@ from __future__ import annotations
 from collections.abc import Iterable
 
 from providers.baidu import BaiduProvider
-from providers.base import MusicProvider, TrackMatch
+from providers.base import MusicProvider, ProviderCircuitBreaker, TrackMatch
 from providers.deezer import DeezerProvider
+from providers.fanart import FanartTvProvider, get_fanart_keys, set_fanart_keys
 from providers.itunes import ITunesProvider
 from providers.kugou import KugouProvider
 from providers.kuwo import KuwoProvider
@@ -21,11 +22,12 @@ from providers.spotify import (
     has_spotify_credentials,
     set_spotify_credentials,
 )
+from providers.theaudiodb import TheAudioDBProvider, get_tadb_api_key, set_tadb_api_key
 from providers.ytmusic import YouTubeMusicProvider
 
 PRIMARY_PROVIDERS: tuple[str, ...] = ('netease', 'qq', 'itunes', 'mb')
 EXTENDED_CN_PROVIDERS: tuple[str, ...] = ('kugou', 'migu', 'baidu')
-EXTENDED_INTL_PROVIDERS: tuple[str, ...] = ('deezer', 'ytmusic', 'lrclib', 'spotify')
+EXTENDED_INTL_PROVIDERS: tuple[str, ...] = ('deezer', 'ytmusic', 'lrclib', 'spotify', 'tadb', 'fanart')
 ONLINE_PROVIDERS: tuple[str, ...] = PRIMARY_PROVIDERS + EXTENDED_CN_PROVIDERS + EXTENDED_INTL_PROVIDERS
 
 netease_provider = NetEaseProvider()
@@ -40,6 +42,8 @@ ytmusic_provider = YouTubeMusicProvider()
 lrclib_provider = LrclibProvider()
 kuwo_provider = KuwoProvider()
 spotify_provider = SpotifyProvider()
+tadb_provider = TheAudioDBProvider()
+fanart_provider = FanartTvProvider()
 
 PROVIDERS: dict[str, MusicProvider] = {
     'netease': netease_provider,
@@ -54,6 +58,8 @@ PROVIDERS: dict[str, MusicProvider] = {
     'lrclib': lrclib_provider,
     'kuwo': kuwo_provider,
     'spotify': spotify_provider,
+    'tadb': tadb_provider,
+    'fanart': fanart_provider,
 }
 
 PROVIDER_LABELS: dict[str, str] = {pid: p.label for pid, p in PROVIDERS.items()}
@@ -71,6 +77,8 @@ _SOURCE_ALIASES: dict[str, str] = {
     'lrclib': 'lrclib', 'lrc': 'lrclib',
     'kuwo': 'kuwo', 'kw': 'kuwo', '酷我': 'kuwo', '酷我音乐': 'kuwo',
     'spotify': 'spotify', 'sp': 'spotify',
+    'tadb': 'tadb', 'theaudiodb': 'tadb', 'audiodb': 'tadb',
+    'fanart': 'fanart', 'fanarttv': 'fanart', 'fanart.tv': 'fanart',
 }
 
 
@@ -135,11 +143,11 @@ def resolve_provider_order(
 
 __all__ = [
     'EXTENDED_CN_PROVIDERS', 'EXTENDED_INTL_PROVIDERS', 'ONLINE_PROVIDERS', 'PRIMARY_PROVIDERS',
-    'PROVIDERS', 'PROVIDER_LABELS', 'MusicProvider', 'TrackMatch',
-    'baidu_provider', 'deezer_provider', 'get_netease_api_base', 'get_spotify_credentials',
-    'has_spotify_credentials', 'itunes_provider', 'kugou_provider',
-    'kuwo_provider', 'lrclib_provider', 'mb_provider', 'migu_provider', 'netease_provider',
-    'normalize_provider_name', 'parse_source_list', 'qq_provider',
-    'resolve_provider_order', 'set_netease_api_base', 'set_spotify_credentials',
-    'spotify_provider', 'ytmusic_provider',
+    'PROVIDERS', 'PROVIDER_LABELS', 'MusicProvider', 'ProviderCircuitBreaker', 'TrackMatch',
+    'baidu_provider', 'deezer_provider', 'fanart_provider', 'get_fanart_keys', 'get_netease_api_base',
+    'get_spotify_credentials', 'get_tadb_api_key', 'has_spotify_credentials', 'itunes_provider',
+    'kugou_provider', 'kuwo_provider', 'lrclib_provider', 'mb_provider', 'migu_provider',
+    'netease_provider', 'normalize_provider_name', 'parse_source_list', 'qq_provider',
+    'resolve_provider_order', 'set_fanart_keys', 'set_netease_api_base', 'set_spotify_credentials',
+    'set_tadb_api_key', 'spotify_provider', 'tadb_provider', 'ytmusic_provider',
 ]

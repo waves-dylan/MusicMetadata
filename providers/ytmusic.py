@@ -181,6 +181,7 @@ class YouTubeMusicProvider(MusicProvider):
     label = 'YouTube Music'
     capabilities = frozenset({'track', 'date', 'cover', 'title', 'artist', 'album', 'albumartist', 'lyrics'})
     supports_album_search = True
+    circuit_breaker = _YTM_CB
 
     def search_album(self, term: str, album_name: str, singer: str) -> tuple[str, str, bool]:
         def _do():

@@ -32,6 +32,7 @@ class LrclibProvider(MusicProvider):
     label = 'LRCLIB'
     capabilities = frozenset({'lyrics'})
     supports_album_search = False
+    circuit_breaker = _LRCLIB_CB
 
     def search_songs(self, term: str) -> list[dict]:
         def _fetch():

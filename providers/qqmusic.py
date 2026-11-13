@@ -8,8 +8,10 @@ import uuid
 
 from providers.base import (
     MusicProvider,
+    ProviderCircuitBreaker,
     build_tracks,
     cached_album,
+    cached_artist_url,
     cached_search,
     cached_song_meta,
     cached_song_search,
@@ -18,6 +20,7 @@ from providers.base import (
     http_get_json,
     http_post_json,
     merge_lyrics,
+    norm_core,
     normalize_release_date,
     parse_lyric_credits,
     set_album_date,
@@ -26,11 +29,15 @@ from providers.base import (
 )
 
 
+_QQ_CB = ProviderCircuitBreaker(threshold=5)
+
+
 class QQMusicProvider(MusicProvider):
     id = 'qq'
     label = 'QQ音乐'
     capabilities = frozenset({'track', 'date', 'cover', 'title', 'artist', 'album', 'albumartist', 'genre', 'composer', 'discnumber', 'lyrics'})
     supports_album_search = True
+    circuit_breaker = _QQ_CB
 
     def search_album(self, term: str, album_name: str, singer: str) -> tuple[str, str, bool]:
         def _do():
@@ -146,6 +153,54 @@ class QQMusicProvider(MusicProvider):
                 return songs
             return self._search_desktop_musicu(term)
         return cached_song_search('qq_song', 'default', term, _fetch)
+
+    def search_artist(self, artist_name: str) -> str:
+        name = str(artist_name or '').strip()
+        if not name:
+            return ''
+
+        def _fetch() -> str:
+            payload = {
+                'comm': {'ct': '6', 'cv': '80600'},
+                'music.search.SearchCgiService.DoSearchForQQMusicDesktop': {
+                    'module': 'music.search.SearchCgiService',
+                    'method': 'DoSearchForQQMusicDesktop',
+                    'param': {
+                        'num_per_page': 5,
+                        'page_num': 1,
+                        'search_type': 1,
+                        'query': name,
+                        'searchid': str(uuid.uuid4()),
+                    },
+                },
+            }
+            d = http_post_json('https://u.y.qq.com/cgi-bin/musicu.fcg', payload, headers={'Referer': 'https://y.qq.com/'})
+            res = (
+                ((d or {}).get('music.search.SearchCgiService.DoSearchForQQMusicDesktop') or {})
+                .get('data', {})
+                .get('body', {})
+                .get('singer', {})
+                .get('list')
+                or []
+            )
+            if not isinstance(res, list) or not res:
+                return ''
+            sk = norm_core(name)
+            for s in res:
+                if not isinstance(s, dict):
+                    continue
+                if sk and norm_core(s.get('singerName') or '') == sk:
+                    smid = str(s.get('singerMID') or '').strip()
+                    if smid:
+                        return f'https://y.gtimg.cn/music/photo_new/T001R800x800M000{smid}.jpg'
+            first = res[0]
+            if isinstance(first, dict):
+                smid = str(first.get('singerMID') or '').strip()
+                if smid:
+                    return f'https://y.gtimg.cn/music/photo_new/T001R800x800M000{smid}.jpg'
+            return ''
+
+        return cached_artist_url('qq', name, _fetch)
 
     def search_song_hits(self, term: str) -> list[dict]:
         hits: list[dict] = []

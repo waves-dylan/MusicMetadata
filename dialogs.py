@@ -2,16 +2,18 @@
 
 from __future__ import annotations
 
+import os
 import sys
 import tkinter as tk
-from tkinter import messagebox, ttk
+from tkinter import filedialog, messagebox, ttk
 
 from art_repair import DELETABLE_FIELDS, SETTABLE_FIELDS, parse_set_tags
-from foobar_library import FIELD_LABELS, LibraryTrack
+from library_scan import FIELD_LABELS, LibraryTrack
 from providers import ONLINE_PROVIDERS, PROVIDER_LABELS
 from runner import ConvertOptions, DeleteOptions, SetOptions, _count_deletable_targets, resolve_hook
 from tag_io import CONVERT_TARGET_FORMATS, find_ffmpeg
 from track_lookup import parse_source_list
+from user_config import get_default_music_folders, normalize_folder_list, ui_font
 
 _ORIG_MSGBOX = messagebox
 
@@ -44,7 +46,7 @@ class _ModalDialog:
         if intro:
             kw: dict = {}
             if bold_intro:
-                kw['font'] = ('Microsoft YaHei UI', 9, 'bold')
+                kw['font'] = ui_font(9, bold=True)
             if wraplength > 0:
                 kw['wraplength'] = wraplength
             ttk.Label(self.outer, text=intro, **kw).pack(anchor='w', pady=(0, 8))
@@ -59,7 +61,7 @@ class _ModalDialog:
         self.btn_confirm = tk.Button(
             btn_bar, text=confirm_text, command=self._on_confirm,
             bg=confirm_bg, fg='#ffffff', activebackground=confirm_active_bg, activeforeground='#ffffff',
-            relief='flat', padx=12, pady=4, font=('Microsoft YaHei UI', 9, 'bold'), cursor='hand2',
+            relief='flat', padx=12, pady=4, font=ui_font(9, bold=True), cursor='hand2',
         )
         self.btn_confirm.pack(side='right', padx=(0, 8))
         return btn_bar
@@ -79,10 +81,10 @@ class DeleteMetadataDialog(_ModalDialog):
         'title', 'artist', 'albumartist', 'album',
         'date', 'tracknumber', 'discnumber', 'genre',
         'composer', 'performer', 'comment', 'lyrics',
-        'cover',
+        'cover', 'artist_cover',
     )
 
-    def __init__(self, parent: tk.Misc, targets: list[LibraryTrack], default_sync: bool = True):
+    def __init__(self, parent: tk.Misc, targets: list[LibraryTrack], default_sync: bool = True, *, has_foobar: bool = True):
         self.targets = targets
         super().__init__(
             parent, '删除部分元数据',
@@ -90,6 +92,8 @@ class DeleteMetadataDialog(_ModalDialog):
         )
 
         counts, count_163, folder_cover_count = _count_deletable_targets(targets)
+        seen_folders = {t.folder for t in targets if t.folder}
+        folder_artist_count = sum(1 for f in seen_folders if os.path.isfile(os.path.join(f, 'artist.jpg')))
         lrc_file_count = sum(1 for t in targets if t.has_lrc_file)
 
         cat_frame = ttk.LabelFrame(self.outer, text='元数据类别', padding=(10, 8))
@@ -103,7 +107,11 @@ class DeleteMetadataDialog(_ModalDialog):
             var = tk.BooleanVar(value=False)
             self.field_vars[key] = var
             label = FIELD_LABELS.get(key, key)
-            cmd = self._on_cover_toggled if key == 'cover' else (self._on_lyrics_toggled if key == 'lyrics' else None)
+            cmd = (
+                self._on_cover_toggled if key == 'cover'
+                else (self._on_artist_cover_toggled if key == 'artist_cover'
+                      else (self._on_lyrics_toggled if key == 'lyrics' else None))
+            )
             chk = ttk.Checkbutton(grid_frm, text=f'{label} ({counts.get(key, 0)})', variable=var, command=cmd)
             chk.grid(row=idx // 4, column=idx % 4, sticky='w', padx=(0, 14), pady=3)
             self.field_checks[key] = chk
@@ -120,6 +128,7 @@ class DeleteMetadataDialog(_ModalDialog):
 
         self.var_protect_163 = tk.BooleanVar(value=True)
         self.var_delete_folder_cover = tk.BooleanVar(value=False)
+        self.var_delete_folder_artist = tk.BooleanVar(value=False)
         self.var_delete_lrc = tk.BooleanVar(value=True)
         self.var_sync = tk.BooleanVar(value=default_sync)
         self.var_dry_run = tk.BooleanVar(value=False)
@@ -138,6 +147,14 @@ class DeleteMetadataDialog(_ModalDialog):
         )
         self.chk_delete_folder_cover.pack(anchor='w', pady=2)
 
+        fart_txt = '删除封面-艺术家时同时删除同目录外置 artist.jpg'
+        if folder_artist_count:
+            fart_txt += f'（涉及 {folder_artist_count} 个）'
+        self.chk_delete_folder_artist = ttk.Checkbutton(
+            opt_frame, text=fart_txt, variable=self.var_delete_folder_artist, state='disabled',
+        )
+        self.chk_delete_folder_artist.pack(anchor='w', pady=2)
+
         lrc_txt = '删除歌词时同时删除同名外置 .lrc 文件'
         if lrc_file_count:
             lrc_txt += f'（涉及 {lrc_file_count} 个）'
@@ -147,7 +164,8 @@ class DeleteMetadataDialog(_ModalDialog):
         self.chk_delete_lrc.pack(anchor='w', pady=2)
 
         self.chk_sync = ttk.Checkbutton(opt_frame, text='删除后刷新 foobar2000 缓存', variable=self.var_sync)
-        self.chk_sync.pack(anchor='w', pady=2)
+        if has_foobar:
+            self.chk_sync.pack(anchor='w', pady=2)
 
         self.chk_dry_run = ttk.Checkbutton(opt_frame, text='仅预演（预览待删除项目，不实际修改文件）', variable=self.var_dry_run)
         self.chk_dry_run.pack(anchor='w', pady=2)
@@ -159,6 +177,7 @@ class DeleteMetadataDialog(_ModalDialog):
         for var in self.field_vars.values():
             var.set(checked)
         self._on_cover_toggled()
+        self._on_artist_cover_toggled()
         self._on_lyrics_toggled()
 
     def _on_cover_toggled(self):
@@ -167,6 +186,13 @@ class DeleteMetadataDialog(_ModalDialog):
         else:
             self.var_delete_folder_cover.set(False)
             self.chk_delete_folder_cover.configure(state='disabled')
+
+    def _on_artist_cover_toggled(self):
+        if self.field_vars.get('artist_cover') and self.field_vars['artist_cover'].get():
+            self.chk_delete_folder_artist.configure(state='normal')
+        else:
+            self.var_delete_folder_artist.set(False)
+            self.chk_delete_folder_artist.configure(state='disabled')
 
     def _on_lyrics_toggled(self):
         self.chk_delete_lrc.configure(state='normal' if self.field_vars['lyrics'].get() else 'disabled')
@@ -178,12 +204,15 @@ class DeleteMetadataDialog(_ModalDialog):
             mb.showinfo('提示', '请至少勾选一项要删除的元数据类别。', parent=self.top)
             return
         del_folder_cov = bool('cover' in selected and self.var_delete_folder_cover.get())
+        del_folder_artist = bool('artist_cover' in selected and self.var_delete_folder_artist.get())
         del_lrc = bool('lyrics' in selected and self.var_delete_lrc.get())
         dry_run = self.var_dry_run.get()
         if not dry_run:
             names = '、'.join(FIELD_LABELS.get(f, f) for f in DELETABLE_FIELDS if f in selected)
             if del_folder_cov:
                 names += '、同目录 cover.jpg'
+            if del_folder_artist:
+                names += '、同目录 artist.jpg'
             if del_lrc:
                 names += '、外置 .lrc'
             if not mb.askyesno(
@@ -196,6 +225,7 @@ class DeleteMetadataDialog(_ModalDialog):
         self.result = DeleteOptions(
             fields=selected,
             delete_folder_cover=del_folder_cov,
+            delete_folder_artist=del_folder_artist,
             delete_lrc_file=del_lrc,
             protect_163_key=self.var_protect_163.get(),
             enable_sync=self.var_sync.get(),
@@ -207,7 +237,7 @@ class DeleteMetadataDialog(_ModalDialog):
 class SetMetadataDialog(_ModalDialog):
     """批量手工设置标准字段或自定义元数据标签的模态弹窗。"""
 
-    def __init__(self, parent: tk.Misc, targets: list[LibraryTrack], default_sync: bool = True):
+    def __init__(self, parent: tk.Misc, targets: list[LibraryTrack], default_sync: bool = True, *, has_foobar: bool = True):
         self.targets = targets
         self._items: dict[str, str] = {}
         super().__init__(
@@ -249,7 +279,9 @@ class SetMetadataDialog(_ModalDialog):
         self.var_sync = tk.BooleanVar(value=default_sync)
         self.var_dry_run = tk.BooleanVar(value=False)
         ttk.Checkbutton(opt_frm, text="保护网易云 163 key（不覆盖内嵌 163 key 注释）", variable=self.var_protect_163).pack(anchor='w', pady=2)
-        ttk.Checkbutton(opt_frm, text='写入后刷新 foobar2000 缓存', variable=self.var_sync).pack(anchor='w', pady=2)
+        self.chk_sync = ttk.Checkbutton(opt_frm, text='写入后刷新 foobar2000 缓存', variable=self.var_sync)
+        if has_foobar:
+            self.chk_sync.pack(anchor='w', pady=2)
         ttk.Checkbutton(opt_frm, text='仅预演（不修改文件）', variable=self.var_dry_run).pack(anchor='w', pady=2)
 
         self._add_button_bar('应用设置')
@@ -316,13 +348,13 @@ class SetMetadataDialog(_ModalDialog):
 class ConvertFormatDialog(_ModalDialog):
     """音频格式批量转换设置弹窗（依赖 ffmpeg）。"""
 
-    def __init__(self, parent: tk.Misc, targets: list[LibraryTrack], default_sync: bool = True):
+    def __init__(self, parent: tk.Misc, targets: list[LibraryTrack], default_sync: bool = True, *, has_foobar: bool = True):
         self.targets = targets
         super().__init__(parent, '转换音频格式')
 
         ffmpeg_path = resolve_hook('find_ffmpeg', find_ffmpeg)()
         ff_note = f'已检测到 ffmpeg: {ffmpeg_path}' if ffmpeg_path else '未检测到 ffmpeg（仅预演可用，实际转换需安装 ffmpeg 并加入 PATH）'
-        ttk.Label(self.outer, text=f'已选择 {len(targets)} 首曲目，转换将自动保留元数据、封面与外置 .lrc：', font=('Microsoft YaHei UI', 9, 'bold')).pack(anchor='w', pady=(0, 4))
+        ttk.Label(self.outer, text=f'已选择 {len(targets)} 首曲目，转换将自动保留元数据、封面与外置 .lrc：', font=ui_font(9, bold=True)).pack(anchor='w', pady=(0, 4))
         ttk.Label(self.outer, text=ff_note, foreground='#15803d' if ffmpeg_path else '#dc2626').pack(anchor='w', pady=(0, 8))
 
         fmt_frm = ttk.Frame(self.outer)
@@ -340,7 +372,9 @@ class ConvertFormatDialog(_ModalDialog):
         self.var_dry_run = tk.BooleanVar(value=False)
         ttk.Checkbutton(opt_frm, text='覆盖已存在的目标文件', variable=self.var_overwrite).pack(anchor='w', pady=2)
         ttk.Checkbutton(opt_frm, text='转换并校验成功后删除源文件（谨慎勾选）', variable=self.var_delete_source).pack(anchor='w', pady=2)
-        ttk.Checkbutton(opt_frm, text='转换后刷新 foobar2000 缓存', variable=self.var_sync).pack(anchor='w', pady=2)
+        self.chk_sync = ttk.Checkbutton(opt_frm, text='转换后刷新 foobar2000 缓存', variable=self.var_sync)
+        if has_foobar:
+            self.chk_sync.pack(anchor='w', pady=2)
         ttk.Checkbutton(opt_frm, text='仅预演（预览转换结果，不执行转码）', variable=self.var_dry_run).pack(anchor='w', pady=2)
 
         self._add_button_bar('开始转换')
@@ -377,6 +411,7 @@ class SourceConfigDialog(_ModalDialog):
         prefer_sources: tuple[str, ...], only_sources: tuple[str, ...],
         skip_sources: tuple[str, ...], netease_api: str,
         spotify_client_id: str = '', spotify_client_secret: str = '',
+        tadb_api_key: str = '', fanart_api_key: str = '', fanart_client_key: str = '',
     ):
         super().__init__(parent, '在线数据源设置')
 
@@ -391,6 +426,9 @@ class SourceConfigDialog(_ModalDialog):
         self.var_ne_api = tk.StringVar(value=netease_api)
         self.var_sp_id = tk.StringVar(value=spotify_client_id)
         self.var_sp_secret = tk.StringVar(value=spotify_client_secret)
+        self.var_tadb_key = tk.StringVar(value=tadb_api_key)
+        self.var_fa_key = tk.StringVar(value=fanart_api_key)
+        self.var_fa_client = tk.StringVar(value=fanart_client_key)
         rows = (
             ('优先顺序 (逗号分隔，留空默认):', self.var_prefer, ''),
             ('仅使用源 (逗号分隔，留空不限):', self.var_only, ''),
@@ -398,6 +436,9 @@ class SourceConfigDialog(_ModalDialog):
             ('自定义网易云 API 地址 (留空直连官方):', self.var_ne_api, ''),
             ('Spotify Client ID (可选，留空仅读缓存):', self.var_sp_id, ''),
             ('Spotify Client Secret (可选):', self.var_sp_secret, '*'),
+            ('TheAudioDB Key (可选，留空默认公共Key):', self.var_tadb_key, ''),
+            ('Fanart.tv Project Key (可选，留空默认):', self.var_fa_key, ''),
+            ('Fanart.tv Client Key (可选免缓存):', self.var_fa_client, ''),
         )
         for row_idx, (lbl_txt, var, mask) in enumerate(rows):
             ttk.Label(frm, text=lbl_txt).grid(row=row_idx, column=0, sticky='w', pady=3)
@@ -414,6 +455,9 @@ class SourceConfigDialog(_ModalDialog):
         self.var_ne_api.set('')
         self.var_sp_id.set('')
         self.var_sp_secret.set('')
+        self.var_tadb_key.set('')
+        self.var_fa_key.set('')
+        self.var_fa_client.set('')
 
     def _on_confirm(self):
         prefer, inv_p = parse_source_list(self.var_prefer.get())
@@ -430,5 +474,76 @@ class SourceConfigDialog(_ModalDialog):
             'netease_api': self.var_ne_api.get().strip(),
             'spotify_client_id': self.var_sp_id.get().strip(),
             'spotify_client_secret': self.var_sp_secret.get().strip(),
+            'tadb_api_key': self.var_tadb_key.get().strip(),
+            'fanart_api_key': self.var_fa_key.get().strip(),
+            'fanart_client_key': self.var_fa_client.get().strip(),
         }
+        self.top.destroy()
+
+
+class FolderManagerDialog(_ModalDialog):
+    """管理多个自定义音乐扫描目录并支持持久化保存的模态弹窗。"""
+
+    def __init__(self, parent: tk.Misc, folders: list[str] | None = None):
+        self._folders = normalize_folder_list(folders)
+        super().__init__(
+            parent,
+            '管理扫描目录',
+            '添加或移除要扫描的本地音乐目录（列表会自动保存，清空后将恢复自动探测）：',
+        )
+
+        list_frm = ttk.Frame(self.outer)
+        list_frm.pack(fill='both', expand=True, pady=(0, 8))
+        self.listbox = tk.Listbox(list_frm, width=64, height=7, activestyle='none', selectmode='extended')
+        self.listbox.pack(side='left', fill='both', expand=True)
+
+        acts = ttk.Frame(list_frm)
+        acts.pack(side='right', padx=(8, 0), fill='y')
+        self.btn_add = ttk.Button(acts, text='添加目录...', width=14, command=self._on_add)
+        self.btn_add.pack(anchor='n', pady=(0, 4))
+        self.btn_add_music = ttk.Button(acts, text='加入系统音乐', width=14, command=self._on_add_default_music)
+        self.btn_add_music.pack(anchor='n', pady=(0, 4))
+        self.btn_remove = ttk.Button(acts, text='移除选中', width=14, command=self._on_remove)
+        self.btn_remove.pack(anchor='n', pady=(0, 4))
+        self.btn_clear = ttk.Button(acts, text='清空(自动)', width=14, command=self._on_clear)
+        self.btn_clear.pack(anchor='n')
+
+        self._refresh_list()
+        self._add_button_bar('保存并扫描')
+
+    def _refresh_list(self):
+        self.listbox.delete(0, 'end')
+        for folder in self._folders:
+            suffix = '' if os.path.isdir(folder) else ' (目录不存在)'
+            self.listbox.insert('end', f'{folder}{suffix}')
+
+    def _on_add(self):
+        folder = filedialog.askdirectory(title='添加要扫描的音乐目录', parent=self.top)
+        if folder:
+            self._folders = normalize_folder_list([*self._folders, folder])
+            self._refresh_list()
+
+    def _on_add_default_music(self):
+        defaults = get_default_music_folders()
+        if not defaults:
+            _msgbox().showinfo('提示', '未检测到系统默认音乐目录（~/Music）。', parent=self.top)
+            return
+        self._folders = normalize_folder_list([*self._folders, *defaults])
+        self._refresh_list()
+
+    def _on_remove(self):
+        sel = list(self.listbox.curselection())
+        if not sel:
+            return
+        for idx in reversed(sel):
+            if 0 <= idx < len(self._folders):
+                self._folders.pop(idx)
+        self._refresh_list()
+
+    def _on_clear(self):
+        self._folders.clear()
+        self._refresh_list()
+
+    def _on_confirm(self):
+        self.result = list(self._folders)
         self.top.destroy()

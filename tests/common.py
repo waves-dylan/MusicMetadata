@@ -63,8 +63,14 @@ class TempTrackTestCase(unittest.TestCase):
     def setUp(self):
         clear_caches()
         self.tmp = tempfile.mkdtemp(prefix='fb_track_test_')
+        self._prev_cfg_env = os.environ.get('MUSICMETADATA_CONFIG')
+        os.environ['MUSICMETADATA_CONFIG'] = os.path.join(self.tmp, 'test_config.json')
 
     def tearDown(self):
+        if self._prev_cfg_env is None:
+            os.environ.pop('MUSICMETADATA_CONFIG', None)
+        else:
+            os.environ['MUSICMETADATA_CONFIG'] = self._prev_cfg_env
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def _make_minimal_mp3(self, filename: str = 'test.mp3') -> str:

@@ -99,6 +99,10 @@ class MusicBrainzProvider(MusicProvider):
     capabilities = frozenset({'track', 'date', 'cover', 'title', 'artist', 'album', 'albumartist', 'genre', 'composer', 'discnumber'})
     supports_album_search = True
 
+    @property
+    def is_available(self) -> bool:
+        return not is_mb_circuit_open()
+
     def search_album(self, term: str, album_name: str, singer: str) -> tuple[str, str, bool]:
         def _do():
             q = f'release:"{album_name}"' + (f' AND artist:"{singer}"' if singer else '')

@@ -121,6 +121,7 @@ class SpotifyProvider(MusicProvider):
     id = 'spotify'
     label = 'Spotify'
     capabilities = frozenset({'track', 'date', 'cover', 'title', 'artist', 'album', 'albumartist', 'genre', 'discnumber'})
+    circuit_breaker = _SPOTIFY_CB
 
     @property
     def supports_album_search(self) -> bool:
