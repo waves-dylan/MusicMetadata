@@ -74,11 +74,17 @@ def save_user_config(data: dict, path: str | None = None) -> bool:
         return False
 
 
-def has_foobar_env(env) -> bool:
-    """判断当前环境是否检测到 foobar2000 可执行文件或媒体库配置。"""
+def is_player_active(env) -> bool:
+    """判断当前环境是否有效检测到音乐播放器可执行文件、配置目录或媒体库目录。"""
     if env is None:
         return False
-    return bool(getattr(env, 'fb_exe', '') or getattr(env, 'library_folders', None))
+    p_type = getattr(env, 'player_type', None)
+    if p_type == 'generic':
+        return False
+    return bool(getattr(env, 'exe_path', '') or getattr(env, 'config_dir', '') or getattr(env, 'library_folders', None))
+
+
+has_player_env = is_player_active
 
 
 def ui_font(size: int = 9, bold: bool = False, mono: bool = False) -> tuple:

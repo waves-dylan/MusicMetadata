@@ -207,6 +207,77 @@ class TheAudioDBProvider(MusicProvider):
 
         return cached_album('tadb', album_id, _fetch)
 
+    def search_artist_candidates(self, artist_name: str, *, track_hint: str = '') -> list[dict]:
+        name = (artist_name or '').strip()
+        if not name:
+            return []
+
+        try:
+            d = _tadb_get('search.php', params={'s': name})
+            artists = (d or {}).get('artists') or [] if isinstance(d, dict) else []
+        except Exception:
+            return []
+        if not isinstance(artists, list):
+            return []
+
+        results: list[dict] = []
+        seen_pics: set[str] = set()
+        for a in artists:
+            if not isinstance(a, dict):
+                continue
+            aname = str(a.get('strArtist') or '').strip() or name
+            genre = str(a.get('strGenre') or '').strip()
+            style = str(a.get('strStyle') or '').strip()
+            country = str(a.get('strCountry') or '').strip()
+
+            # 1. 宽幅舞台写真壁纸 (1920x1080 Landscape)
+            fanarts = [
+                ('strArtistFanart', '1920×1080 横版', 'landscape', 1920, 1080, f'{genre} · 全景舞台写真' if genre else '舞台高清壁纸'),
+                ('strArtistFanart2', '1920×1080 横版', 'landscape', 1920, 1080, f'{style} · 舞台写真 2' if style else '全景壁纸 2'),
+                ('strArtistFanart3', '1920×1080 横版', 'landscape', 1920, 1080, f'{genre} · 舞台写真 3' if genre else '全景壁纸 3'),
+                ('strArtistWideThumb', '1000×562 横版', 'landscape', 1000, 562, f'{country} · 宽幅横版' if country else '宽幅背景图'),
+            ]
+            for field_name, res_label, aspect, w, h, clue_text in fanarts:
+                pic = str(a.get(field_name) or '').strip()
+                if pic and pic.startswith('http') and pic not in seen_pics:
+                    seen_pics.add(pic)
+                    results.append({
+                        'source': self.label,
+                        'platform': self.id,
+                        'artist_name': aname,
+                        'pic_url': pic,
+                        'aspect_type': aspect,
+                        'resolution': res_label,
+                        'width': w,
+                        'height': h,
+                        'clues': clue_text.strip(' ·'),
+                        'raw_meta': a,
+                    })
+
+            # 2. 正方形特写头像 (1000x1000 Square)
+            thumbs = [
+                ('strArtistThumb', '1000×1000 方图', 'square', 1000, 1000, f'{country} · 肖像头像' if country else (f'{genre} · 官方肖像' if genre else '高清头像')),
+                ('strArtistCutout', '800×800 方图', 'square', 800, 800, f'{genre} · 艺术剪影' if genre else '艺术头像'),
+            ]
+            for field_name, res_label, aspect, w, h, clue_text in thumbs:
+                pic = str(a.get(field_name) or '').strip()
+                if pic and pic.startswith('http') and pic not in seen_pics:
+                    seen_pics.add(pic)
+                    results.append({
+                        'source': self.label,
+                        'platform': self.id,
+                        'artist_name': aname,
+                        'pic_url': pic,
+                        'aspect_type': aspect,
+                        'resolution': res_label,
+                        'width': w,
+                        'height': h,
+                        'clues': clue_text.strip(' ·'),
+                        'raw_meta': a,
+                    })
+
+        return results
+
     def search_artist(self, artist_name: str) -> str:
         name = (artist_name or '').strip()
         if not name:

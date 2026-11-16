@@ -18,9 +18,9 @@ from core.constants import (
     ARTIST_PIC_TYPE,
     STATUS_MISSING_DISK,
     STATUS_OK,
-    STATUS_STALE_FOOBAR,
+    STATUS_STALE_PLAYER,
 )
-from core.models import FoobarEnv, TrackMatch
+from core.models import FoobarEnv, LibraryTrack, TrackMatch
 from infra.integrations.foobar import (
     _parse_metadb_info,
     parse_library_folders,
@@ -124,11 +124,11 @@ class ArtRepairTests(TempTrackTestCase):
         conn.commit()
         conn.close()
 
-        env = FoobarEnv(fb_dir=fb_dir, profile_dir=prof_dir, library_folders=[music_dir])
+        env = FoobarEnv(app_dir=fb_dir, config_dir=prof_dir, library_folders=[music_dir])
         tracks = scan_library(env)
         by_name = {t.filename: t for t in tracks}
         self.assertEqual(by_name['a_missing.flac'].status, STATUS_MISSING_DISK)
-        self.assertEqual(by_name['b_stale.flac'].status, STATUS_STALE_FOOBAR)
+        self.assertEqual(by_name['b_stale.flac'].status, STATUS_STALE_PLAYER)
         self.assertEqual(by_name['c_ok.flac'].status, STATUS_OK)
 
     def test_scan_detects_full_metadata_desync_when_size_and_mtime_equal(self):
@@ -162,13 +162,13 @@ class ArtRepairTests(TempTrackTestCase):
         conn.commit()
         conn.close()
 
-        env = FoobarEnv(fb_dir=fb_dir, profile_dir=prof_dir, library_folders=[music_dir])
+        env = FoobarEnv(app_dir=fb_dir, config_dir=prof_dir, library_folders=[music_dir])
         tracks = scan_library(env, include_art_scan=False)
         self.assertEqual(len(tracks), 1)
         tr = tracks[0]
-        self.assertEqual(tr.status, STATUS_STALE_FOOBAR)
-        self.assertTrue(tr.needs_foobar_sync)
-        self.assertTrue(any('专辑艺术家' in r for r in tr.foobar_stale_reasons))
+        self.assertEqual(tr.status, STATUS_STALE_PLAYER)
+        self.assertTrue(tr.needs_player_sync)
+        self.assertTrue(any('专辑艺术家' in r for r in tr.player_stale_reasons))
 
     def test_art_repair_single_and_multi_album_atomic_fix(self):
         # 1) 单专辑目录：track1 健康，track2(mp3) 缺封面+缺分组标签+缺音轨号
@@ -509,3 +509,195 @@ class ArtRepairTests(TempTrackTestCase):
         self.assertFalse(cancelled)
         self.assertEqual(ok_cnt, 1)
         self.assertTrue(os.path.isfile(os.path.join(alb_dir, 'artist.jpg')))
+
+    def test_dff_art_and_prevent_artist_jpg_used_as_cover(self):
+        from services.art import _pick_folder_image
+        alb_dir = os.path.join(self.tmp, 'DffArtistTest')
+        os.makedirs(alb_dir, exist_ok=True)
+        dff_p = self._make_minimal_dff(os.path.join(alb_dir, '01 - Track.dff'))
+
+        art_p = os.path.join(alb_dir, 'artist.jpg')
+        with open(art_p, 'wb') as fp:
+            fp.write(self._make_jpeg_bytes(300, 300, (255, 0, 0)))
+
+        # 1. 验证 _pick_folder_image 绝不将 artist.jpg 选为封面
+        picked = _pick_folder_image(alb_dir)
+        self.assertIsNone(picked)
+
+        # 2. 验证 analyze_folder_art_and_tags 判定为 nodata，而非 create；曲目封面状态提示手动挑选
+        plan = analyze_folder_art_and_tags(alb_dir, [dff_p])
+        self.assertEqual(plan.cover_action, 'nodata')
+        self.assertIsNone(plan.cover_jpeg)
+        norm_k = os.path.normcase(os.path.abspath(dff_p))
+        self.assertEqual(plan.track_plans[norm_k].cover_status, '缺封面(手动挑选)')
+
+        # 3. 验证即使目录下已有与 artist.jpg 一模一样的 cover.jpg，也能识别并判定为待重写 nodata
+        cov_p = os.path.join(alb_dir, 'cover.jpg')
+        with open(cov_p, 'wb') as fp:
+            fp.write(self._make_jpeg_bytes(300, 300, (255, 0, 0)))
+        plan2 = analyze_folder_art_and_tags(alb_dir, [dff_p])
+        self.assertEqual(plan2.cover_action, 'nodata')
+        self.assertIsNone(plan2.cover_jpeg)
+        self.assertIn('重复', plan2.detail)
+
+    def test_prevent_artist_pic_promoted_to_front_cover_and_detect_dup(self):
+        from services.art.planner import plan_picture_fix
+        fake_art = self._make_jpeg_bytes(200, 200, (10, 20, 30))
+        fake_genuine_cov = self._make_jpeg_bytes(300, 300, (200, 210, 220))
+
+        # 1. 只有 Type 8 艺术家图片时，绝不升级为 Type 3 封面
+        art_only_pics = [{'type': ARTIST_PIC_TYPE, 'mime': 'image/jpeg', 'data': fake_art}]
+        need, reasons, tgt, mime = plan_picture_fix(art_only_pics, album_jpeg=None)
+        self.assertFalse(need)
+        self.assertIn('no-cover-source', reasons)
+        self.assertNotIn('type-fixed(8->3)', reasons)
+        self.assertIsNone(tgt)
+
+        # 2. 如果提供了合法专辑封面 album_jpeg，即使有 Type 8，也能正确规划写入真实封面
+        need2, reasons2, tgt2, _ = plan_picture_fix(art_only_pics, album_jpeg=fake_genuine_cov)
+        self.assertTrue(need2)
+        self.assertIn('no-cover', reasons2)
+        self.assertEqual(tgt2, fake_genuine_cov)
+
+        # 3. 如果 Type 3 封面图片与 Type 8 艺术家图片重复，且存在独立真实专辑封面时，应替换为真实专辑封面
+        dup_pics = [
+            {'type': ARTIST_PIC_TYPE, 'mime': 'image/jpeg', 'data': fake_art},
+            {'type': 3, 'mime': 'image/jpeg', 'data': fake_art},
+        ]
+        need3, reasons3, tgt3, _ = plan_picture_fix(dup_pics, album_jpeg=fake_genuine_cov)
+        self.assertTrue(need3)
+        self.assertIn('front-is-artist-dup', reasons3)
+        self.assertEqual(tgt3, fake_genuine_cov)
+
+        # 4. 若无独立专辑封面，则曲目已有 Type 3 作为唯一合法封面予以保留，不被误报为缺少封面
+        need4, reasons4, tgt4, _ = plan_picture_fix(dup_pics, album_jpeg=None)
+        self.assertFalse(need4)
+        self.assertNotIn('no-cover-source', reasons4)
+
+        # 4. 验证 analyze_folder_art_and_tags 针对内嵌艺术家图片音频，绝不将其选为专辑封面
+        test_dir = os.path.join(self.tmp, 'ArtNoPromoteTest')
+        os.makedirs(test_dir, exist_ok=True)
+        flac_p = self._make_minimal_flac(os.path.join(test_dir, 'Track.flac'))
+        from services.art.writer import apply_artist_picture
+        from tag_io import LOADERS
+        flac_obj = LOADERS['flac'](flac_p)
+        apply_artist_picture(flac_obj, 'flac', fake_art)
+        flac_obj.save()
+
+        plan = analyze_folder_art_and_tags(test_dir, [flac_p])
+        self.assertEqual(plan.cover_action, 'nodata')
+        self.assertIsNone(plan.cover_jpeg)
+        self.assertEqual(plan.artist_cover_action, 'create')
+        self.assertIsNotNone(plan.artist_cover_jpeg)
+
+    def test_candidate_album_covers_search_and_dialog_import(self):
+        from tests.common import offscreen_tk
+        from services.lookup import search_candidate_album_covers
+        from ui.dialogs import CoverPickerDialog
+
+        # 验证 search_candidate_album_covers 能够根据入参有效打分
+        mock_p = type('MockProv', (), {
+            'is_available': True,
+            'label': 'TestMock',
+            'search_song_hits': lambda *a, **kw: [
+                {'song_id': '1', 'album_id': 'a1', 'album_name': '小城故事', 'artist': '邓丽君', 'release_date': '1979-03-01', 'cover_url': 'http://test/1.jpg'},
+                {'song_id': '2', 'album_id': 'a2', 'album_name': '经典精选集', 'artist': '邓丽君', 'release_date': '2015-01-01', 'cover_url': 'http://test/2.jpg'},
+            ],
+            'get_album_tracks': lambda *a, **kw: [],
+        })()
+
+        with patch.dict('services.lookup.resolver.PROVIDERS', {'mock': mock_p}, clear=True):
+            events = []
+            cands = search_candidate_album_covers(
+                '小城故事', '邓丽君', prefer_sources=['mock'], on_progress=lambda e: events.append(e)
+            )
+            self.assertEqual(len(cands), 2)
+            # 验证原版同名专辑得分高于精选集
+            self.assertGreater(cands[0]['score'], cands[1]['score'])
+            self.assertEqual(cands[0]['album_name'], '小城故事')
+            # 验证实时进度事件正常触发
+            evt_types = [e['type'] for e in events]
+            self.assertIn('start', evt_types)
+            self.assertIn('tier_start', evt_types)
+            self.assertIn('platform_start', evt_types)
+            self.assertIn('platform_done', evt_types)
+            self.assertIn('done', evt_types)
+
+        # 验证 CoverPickerDialog 多专辑向导与单专辑兼容性
+        with offscreen_tk() as root:
+            t1 = LibraryTrack(path='D:/A/1.flac', filename='1.flac', folder='D:/A', title='SongA', artist='ArtistA', album='AlbA')
+            t2 = LibraryTrack(path='D:/B/2.flac', filename='2.flac', folder='D:/B', title='SongB', artist='ArtistB', album='AlbB')
+
+            # 1. 单曲入参向后兼容
+            dlg_single = CoverPickerDialog(root, t1, auto_search=False)
+            self.assertFalse(dlg_single.is_multi)
+            self.assertEqual(len(dlg_single.album_groups), 1)
+
+            # 2. 多专辑向导模式 (A+B融合)
+            grps = [
+                {'folder': 'D:/A', 'rep_track': t1, 'tracks': [t1], 'album_name': 'AlbA', 'artist': 'ArtistA', 'saved': False},
+                {'folder': 'D:/B', 'rep_track': t2, 'tracks': [t2], 'album_name': 'AlbB', 'artist': 'ArtistB', 'saved': False},
+            ]
+            dlg_multi = CoverPickerDialog(root, grps, auto_search=False)
+            self.assertTrue(dlg_multi.is_multi)
+            self.assertEqual(dlg_multi._current_index, 0)
+            # 翻页到下一专辑
+            dlg_multi._on_next_album()
+            self.assertEqual(dlg_multi._current_index, 1)
+            # 翻页回前一专辑
+            dlg_multi._on_prev_album()
+            self.assertEqual(dlg_multi._current_index, 0)
+
+            # 3. 验证实时进度看板与大图模式双向切换
+            self.assertEqual(dlg_multi._view_mode, 'dash')
+            dlg_multi._show_preview_view()
+            self.assertEqual(dlg_multi._view_mode, 'preview')
+            dlg_multi._show_dashboard_view()
+            self.assertEqual(dlg_multi._view_mode, 'dash')
+
+            # 验证看板进度事件处理
+            dlg_multi._handle_progress_evt({
+                'type': 'platform_done', 'platform': 'qq', 'platform_label': 'QQ音乐', 'added': 2, 'found_count': 2
+            }, dlg_multi._search_thread_id)
+            self.assertEqual(dlg_multi._plat_status_labels['qq'].cget('text'), '🟢 命中 2 张')
+            self.assertIn('2', dlg_multi.lbl_dash_count.cget('text'))
+
+    def test_folder_jpg_insitu_preservation(self):
+        from services.art.planner import analyze_folder_art_and_tags, apply_folder_cover_file, delete_folder_cover_file
+
+        f_dir = os.path.join(self.tmp, 'MusicBeeFolderArt')
+        os.makedirs(f_dir, exist_ok=True)
+        t = self._make_minimal_flac(os.path.join(f_dir, 'track.flac'))
+        f_flac = FLAC(t)
+        f_flac['TITLE'] = ['Test Song']
+        f_flac['ARTIST'] = ['Singer']
+        f_flac['ALBUM'] = ['Classic Album']
+        f_flac.save()
+
+        # 模拟已有经典的 folder.jpg
+        jpg_data = self._make_jpeg_bytes(200, 200, (100, 150, 200))
+        folder_jpg_path = os.path.join(f_dir, 'folder.jpg')
+        with open(folder_jpg_path, 'wb') as fp:
+            fp.write(jpg_data)
+
+        # 1. 验证规划器就地感知 folder.jpg：识别为合法外置封面，标记为 ok，绝不重复生成 cover.jpg
+        plan = analyze_folder_art_and_tags(f_dir, [t])
+        self.assertEqual(os.path.basename(plan.cover_path), 'folder.jpg')
+        self.assertEqual(plan.cover_action, 'ok')
+        self.assertFalse(os.path.exists(os.path.join(f_dir, 'cover.jpg')))
+
+        # 2. 验证改写操作就地随俗：就地更新 folder.jpg 而非创建 cover.jpg
+        new_jpg = self._make_jpeg_bytes(300, 300, (200, 100, 50))
+        plan.cover_jpeg = new_jpg
+        plan.cover_action = 'rewrite'
+        ok, msg = apply_folder_cover_file(plan)
+        self.assertTrue(ok)
+        self.assertIn('folder.jpg', msg)
+        self.assertTrue(os.path.isfile(folder_jpg_path))
+        self.assertFalse(os.path.exists(os.path.join(f_dir, 'cover.jpg')))
+
+        # 3. 验证删除操作兼顾删除 folder.jpg
+        ok_del, msg_del = delete_folder_cover_file(f_dir)
+        self.assertTrue(ok_del)
+        self.assertFalse(os.path.exists(folder_jpg_path))
+

@@ -19,6 +19,7 @@ class SourceConfigDialog(_ModalDialog):
         skip_sources: tuple[str, ...], netease_api: str,
         spotify_client_id: str = '', spotify_client_secret: str = '',
         tadb_api_key: str = '', fanart_api_key: str = '', fanart_client_key: str = '',
+        discogs_token: str = '',
     ):
         super().__init__(parent, '在线数据源设置')
 
@@ -36,6 +37,7 @@ class SourceConfigDialog(_ModalDialog):
         self.var_tadb_key = tk.StringVar(value=tadb_api_key)
         self.var_fa_key = tk.StringVar(value=fanart_api_key)
         self.var_fa_client = tk.StringVar(value=fanart_client_key)
+        self.var_discogs_token = tk.StringVar(value=discogs_token)
         rows = (
             ('优先顺序 (逗号分隔，留空默认):', self.var_prefer, ''),
             ('仅使用源 (逗号分隔，留空不限):', self.var_only, ''),
@@ -46,6 +48,7 @@ class SourceConfigDialog(_ModalDialog):
             ('TheAudioDB Key (可选，留空默认公共Key):', self.var_tadb_key, ''),
             ('Fanart.tv Project Key (可选，留空默认):', self.var_fa_key, ''),
             ('Fanart.tv Client Key (可选免缓存):', self.var_fa_client, ''),
+            ('Discogs Token (可选，发烧实体库专属):', self.var_discogs_token, '*'),
         )
         for row_idx, (lbl_txt, var, mask) in enumerate(rows):
             ttk.Label(frm, text=lbl_txt).grid(row=row_idx, column=0, sticky='w', pady=3)
@@ -65,6 +68,7 @@ class SourceConfigDialog(_ModalDialog):
         self.var_tadb_key.set('')
         self.var_fa_key.set('')
         self.var_fa_client.set('')
+        self.var_discogs_token.set('')
 
     def _on_confirm(self):
         prefer, inv_p = parse_source_list(self.var_prefer.get())
@@ -84,5 +88,6 @@ class SourceConfigDialog(_ModalDialog):
             'tadb_api_key': self.var_tadb_key.get().strip(),
             'fanart_api_key': self.var_fa_key.get().strip(),
             'fanart_client_key': self.var_fa_client.get().strip(),
+            'discogs_token': self.var_discogs_token.get().strip(),
         }
         self.top.destroy()

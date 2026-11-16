@@ -31,6 +31,7 @@ from services.art.image_ops import (
     _SNIFF_IMAGE_CACHE,
     _lanczos,
     ahash,
+    clear_image_caches,
     ham,
     normalize_artist_jpeg,
     normalize_jpeg,

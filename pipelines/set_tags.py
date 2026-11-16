@@ -6,17 +6,17 @@ import os
 
 from services.art import apply_track_set_tags
 from core.constants import STATUS_ERROR
-from core.models import FoobarEnv, LibraryTrack
-from pipelines.executor import _run_pool_cancellable, _sync_foobar_targets
+from core.models import LibraryTrack, PlayerEnv
+from pipelines.executor import _run_pool_cancellable, _sync_player_targets
 from pipelines.options import SetOptions
 from tag_io import read_audio_info
 
 
 def execute_set_tags(
-    env: FoobarEnv, targets: list[LibraryTrack], options: SetOptions,
+    env: PlayerEnv, targets: list[LibraryTrack], options: SetOptions,
     progress_cb=None, row_cb=None, log_cb=None, is_cancelled_cb=None,
 ) -> dict:
-    """批量手工覆写选定曲目的标准字段或自定义标签（支持预演、163 key 保护与 foobar 刷新）。"""
+    """批量手工覆写选定曲目的标准字段或自定义标签（支持预演、163 key 保护与播放器缓存刷新）。"""
     tag_values = dict(options.tag_values or {})
     total = len(targets)
     cancelled = False
@@ -51,7 +51,7 @@ def execute_set_tags(
             modified_paths.append(tr.path)
             if options.enable_sync:
                 synced_paths.append(tr.path)
-                foobar_mtimes[os.path.normcase(os.path.abspath(tr.path))] = max(tr.foobar_mtime, tr.disk_mtime)
+                foobar_mtimes[os.path.normcase(os.path.abspath(tr.path))] = max(tr.cached_mtime, tr.disk_mtime)
             emit_row(tr.path, {
                 'status_text': '已设置', 'source_note': msg, 'color': 'ok',
                 'set_tags': dict(tag_values), 'new_info': new_info or read_audio_info(tr.path), 'synced': options.enable_sync,
@@ -106,7 +106,7 @@ def execute_set_tags(
 
     touched, reloaded = (0, False)
     if not options.dry_run and synced_paths and not cancelled:
-        touched, reloaded = _sync_foobar_targets(env, synced_paths, foobar_mtimes, emit_log)
+        touched, reloaded = _sync_player_targets(env, synced_paths, foobar_mtimes, emit_log)
 
     return {
         'cancelled': cancelled, 'dry_run': options.dry_run,

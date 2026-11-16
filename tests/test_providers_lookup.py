@@ -269,14 +269,33 @@ class ProvidersLookupTests(TempTrackTestCase):
             self.assertEqual(res_sg.release_date, '2022-01-01')
 
     def test_resolve_track_metadata_cross_platform_merge_and_cover_download(self):
-        # 验证歌词作曲解析（不再提取表演者）
+        # 验证歌词作曲解析（支持普通LRC、逐字JSON与中英双语标签）
         comp = parse_lyric_credits(
-            '[00:00.00] 作词 : Wordsmith\n'
-            '[00:01.00] 作曲 : MelodyA / MelodyB\n'
-            '[00:02.00] 演唱 : SingerX\n'
-            '[00:03.00] 吉他 : GuitaristY\n'
+            '[00:00.00] 作词Lyricist : Wordsmith\n'
+            '[00:01.00] 作曲Composition : MelodyA / MelodyB\n'
+            '[00:02.00] 编曲Arranger : ArrangerZ\n'
+            '[00:03.00] 制作人Producer : ProducerW\n'
+            '[00:04.00] 演奏Rendition : Orchestra\n'
+            '[00:05.00] 演唱 : SingerX\n'
+            '[00:06.00] 吉他 : GuitaristY\n'
         )
         self.assertEqual(comp, 'MelodyA, MelodyB')
+
+        # 验证 YRC / JSON 逐字歌词解析
+        comp_json = parse_lyric_credits(
+            '{"t":0,"c":[{"tx":"作词: "},{"tx":"器乐曲"}]}\n'
+            '{"t":1000,"c":[{"tx":"作曲: "},{"tx":"董亚千"}]}\n'
+            '{"t":2000,"c":[{"tx":"编曲: "},{"tx":"万青"}]}\n'
+        )
+        self.assertEqual(comp_json, '董亚千')
+
+        # 验证网易云负偏移/顺序时间戳标签 [00:00.00-1] 解析
+        comp_subts = parse_lyric_credits(
+            '[00:00.00-1] 作词 : Wordsmith\n'
+            '[00:00.00-1] 作曲 : 宋冬野\n'
+            '[00:00.00-1] 编曲 : 韦伟\n'
+        )
+        self.assertEqual(comp_subts, '宋冬野')
 
         # 验证 _merge_match 仅补空白不覆盖已有值，且 TrackMatch 不包含 comment / performer 字段
         self.assertFalse(hasattr(TrackMatch(None), 'comment'))
@@ -585,7 +604,7 @@ class ProvidersLookupTests(TempTrackTestCase):
                 tr_qq = LibraryTrack(
                     path=os.path.join(self.tmp, 'SongQQ.flac'), folder=self.tmp, filename='SongQQ.flac',
                     container='flac', title='SongQQ', artist='SingerQQ', album='AlbumQQ',
-                    duration=200.0, disk_size=100, disk_mtime=1.0, foobar_mtime=1.0, status=STATUS_OK,
+                    duration=200.0, disk_size=100, disk_mtime=1.0, cached_mtime=1.0, status=STATUS_OK,
                 )
                 res_qq = resolve_track_metadata(tr_qq, need_track=True, need_date=False, need_lyrics=True, need_fields={'tracknumber', 'lyrics'}, only_sources=('qq',))
                 self.assertEqual(res_qq.tracknumber, 1)
@@ -595,7 +614,7 @@ class ProvidersLookupTests(TempTrackTestCase):
                 tr_mg = LibraryTrack(
                     path=os.path.join(self.tmp, 'MiguSong.flac'), folder=self.tmp, filename='MiguSong.flac',
                     container='flac', title='MiguSong', artist='MiguArtist', album='',
-                    duration=200.0, disk_size=100, disk_mtime=1.0, foobar_mtime=1.0, status=STATUS_OK,
+                    duration=200.0, disk_size=100, disk_mtime=1.0, cached_mtime=1.0, status=STATUS_OK,
                 )
                 res_mg = resolve_track_metadata(tr_mg, need_track=False, need_date=False, need_cover=True, need_core=True, need_lyrics=True, need_fields={'cover', 'album', 'lyrics'}, only_sources=('migu',))
                 self.assertEqual(res_mg.album_name, 'MiguAlbum')
@@ -606,7 +625,7 @@ class ProvidersLookupTests(TempTrackTestCase):
                 tr_bd = LibraryTrack(
                     path=os.path.join(self.tmp, 'BaiduSong.flac'), folder=self.tmp, filename='BaiduSong.flac',
                     container='flac', title='BaiduSong', artist='BaiduArtist', album='',
-                    duration=200.0, disk_size=100, disk_mtime=1.0, foobar_mtime=1.0, status=STATUS_OK,
+                    duration=200.0, disk_size=100, disk_mtime=1.0, cached_mtime=1.0, status=STATUS_OK,
                 )
                 res_bd = resolve_track_metadata(tr_bd, need_track=False, need_date=False, need_cover=True, need_core=True, need_lyrics=True, need_fields={'cover', 'album', 'lyrics'}, only_sources=('baidu',))
                 self.assertEqual(res_bd.album_name, 'BaiduAlbum')
@@ -619,7 +638,7 @@ class ProvidersLookupTests(TempTrackTestCase):
                 tr_kg = LibraryTrack(
                     path=os.path.join(self.tmp, 'KugouSong.flac'), folder=self.tmp, filename='KugouSong.flac',
                     container='flac', title='KugouSong', artist='KugouArtist', album='',
-                    duration=210.0, disk_size=100, disk_mtime=1.0, foobar_mtime=1.0, status=STATUS_OK,
+                    duration=210.0, disk_size=100, disk_mtime=1.0, cached_mtime=1.0, status=STATUS_OK,
                 )
                 res_kg = resolve_track_metadata(tr_kg, need_track=False, need_date=False, need_cover=True, need_core=True, need_lyrics=True, need_fields={'cover', 'album', 'lyrics'}, only_sources=('kugou',))
                 self.assertEqual(res_kg.cover_url, 'https://kugou.test/400/cov.jpg')
@@ -631,7 +650,7 @@ class ProvidersLookupTests(TempTrackTestCase):
                 tr_ne = LibraryTrack(
                     path=os.path.join(self.tmp, 'CustomNeSong.flac'), folder=self.tmp, filename='CustomNeSong.flac',
                     container='flac', title='CustomNeSong', artist='CustomNeArtist', album='CustomNeAlbum',
-                    duration=240.0, disk_size=100, disk_mtime=1.0, foobar_mtime=1.0, status=STATUS_OK,
+                    duration=240.0, disk_size=100, disk_mtime=1.0, cached_mtime=1.0, status=STATUS_OK,
                 )
                 res_ne = resolve_track_metadata(tr_ne, need_track=True, need_date=False, need_lyrics=True, need_fields={'tracknumber', 'lyrics'}, only_sources=('netease',))
                 self.assertEqual(res_ne.tracknumber, 1)
@@ -863,7 +882,7 @@ class ProvidersLookupTests(TempTrackTestCase):
                 tr_dz = LibraryTrack(
                     path=os.path.join(self.tmp, 'One More Time.flac'), folder=self.tmp, filename='One More Time.flac',
                     container='flac', title='One More Time', artist='Daft Punk', album='Discovery',
-                    duration=320.0, disk_size=100, disk_mtime=1.0, foobar_mtime=1.0, status=STATUS_OK,
+                    duration=320.0, disk_size=100, disk_mtime=1.0, cached_mtime=1.0, status=STATUS_OK,
                 )
                 res_dz = resolve_track_metadata(
                     tr_dz,
@@ -880,7 +899,7 @@ class ProvidersLookupTests(TempTrackTestCase):
                 tr_ytm = LibraryTrack(
                     path=os.path.join(self.tmp, 'Get Lucky.flac'), folder=self.tmp, filename='Get Lucky.flac',
                     container='flac', title='Get Lucky', artist='Daft Punk', album='Random Access Memories',
-                    duration=248.0, disk_size=100, disk_mtime=1.0, foobar_mtime=1.0, status=STATUS_OK,
+                    duration=248.0, disk_size=100, disk_mtime=1.0, cached_mtime=1.0, status=STATUS_OK,
                 )
                 res_ytm = resolve_track_metadata(
                     tr_ytm,
@@ -898,7 +917,7 @@ class ProvidersLookupTests(TempTrackTestCase):
                 tr_ytm_song = LibraryTrack(
                     path=os.path.join(self.tmp, 'Get Lucky_single.flac'), folder=self.tmp, filename='Get Lucky.flac',
                     container='flac', title='Get Lucky', artist='Daft Punk', album='',
-                    duration=248.0, disk_size=100, disk_mtime=1.0, foobar_mtime=1.0, status=STATUS_OK,
+                    duration=248.0, disk_size=100, disk_mtime=1.0, cached_mtime=1.0, status=STATUS_OK,
                 )
                 res_ytm_song = resolve_track_metadata(
                     tr_ytm_song,
@@ -923,7 +942,7 @@ class ProvidersLookupTests(TempTrackTestCase):
                 tr_sp = LibraryTrack(
                     path=os.path.join(self.tmp, 'SpSong.flac'), folder=self.tmp, filename='SpSong.flac',
                     container='flac', title='SpSong', artist='SpArtist', album='SpotifyAlb',
-                    duration=210.0, disk_size=100, disk_mtime=1.0, foobar_mtime=1.0, status=STATUS_OK,
+                    duration=210.0, disk_size=100, disk_mtime=1.0, cached_mtime=1.0, status=STATUS_OK,
                 )
                 res_sp = resolve_track_metadata(
                     tr_sp,
@@ -942,7 +961,7 @@ class ProvidersLookupTests(TempTrackTestCase):
                     filename='SpSong - 4uLU6hMCjMI75M1A2tKUQC.flac',
                     container='flac',
                     title='SpSong',
-                    duration=210.0, disk_size=100, disk_mtime=1.0, foobar_mtime=1.0, status=STATUS_OK,
+                    duration=210.0, disk_size=100, disk_mtime=1.0, cached_mtime=1.0, status=STATUS_OK,
                 )
                 res_sp_id = resolve_track_metadata(tr_sp_id, need_track=True, need_date=True, only_sources=('spotify',))
                 self.assertEqual(res_sp_id.tracknumber, 1)

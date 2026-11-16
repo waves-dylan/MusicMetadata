@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import ctypes
 import glob
 import os
 import shutil
@@ -10,18 +9,18 @@ import sqlite3
 import struct
 import subprocess
 import tempfile
-from ctypes import wintypes
 
 from core.constants import (
     CORE_TEXT_FIELDS,
     EXTRA_TEXT_FIELDS,
     FIELD_LABELS,
+    PLAYER_TYPE_FOOBAR,
     STATUS_ERROR,
     STATUS_MISSING_DISK,
     STATUS_OK,
-    STATUS_STALE_FOOBAR,
 )
-from core.models import FoobarEnv, LibraryTrack
+from core.models import LibraryTrack, PlayerEnv
+from infra.integrations.base import BasePlayerAdapter, get_running_process_exes
 from infra.scanner import (
     _append_note,
     _is_full_album_file,
@@ -37,42 +36,8 @@ from infra.scanner import (
 
 def get_running_foobar_exes() -> list[str]:
     """查询当前运行的 foobar2000.exe 路径列表。"""
-    if os.name != 'nt':
-        return []
-    paths: list[str] = []
-    try:
-        k32 = ctypes.WinDLL('kernel32', use_last_error=True)
-
-        class PROCESSENTRY32W(ctypes.Structure):
-            _fields_ = [
-                ('dwSize', wintypes.DWORD), ('cntUsage', wintypes.DWORD), ('th32ProcessID', wintypes.DWORD),
-                ('th32DefaultHeapID', ctypes.c_size_t), ('th32ModuleID', wintypes.DWORD), ('cntThreads', wintypes.DWORD),
-                ('th32ParentProcessID', wintypes.DWORD), ('pcPriClassBase', ctypes.c_long), ('dwFlags', wintypes.DWORD),
-                ('szExeFile', wintypes.WCHAR * 260),
-            ]
-
-        snap = k32.CreateToolhelp32Snapshot(2, 0)
-        if snap == wintypes.HANDLE(-1).value:
-            return []
-        try:
-            ent = PROCESSENTRY32W(dwSize=ctypes.sizeof(PROCESSENTRY32W))
-            ok = k32.Process32FirstW(snap, ctypes.byref(ent))
-            while ok:
-                if ent.szExeFile.lower() == 'foobar2000.exe':
-                    hp = k32.OpenProcess(0x1000, False, ent.th32ProcessID)
-                    if hp:
-                        try:
-                            buf, sz = ctypes.create_unicode_buffer(1024), wintypes.DWORD(1024)
-                            if k32.QueryFullProcessImageNameW(hp, 0, buf, ctypes.byref(sz)) and buf.value not in paths:
-                                paths.append(buf.value)
-                        finally:
-                            k32.CloseHandle(hp)
-                ok = k32.Process32NextW(snap, ctypes.byref(ent))
-        finally:
-            k32.CloseHandle(snap)
-    except Exception:
-        pass
-    return paths
+    res = get_running_process_exes('foobar2000.exe')
+    return res.get('foobar2000.exe', [])
 
 
 def _detect_reload_command(fb_exe: str) -> str:
@@ -144,7 +109,7 @@ def parse_library_folders(profile_dir: str, fb_dir: str) -> tuple[list[str], lis
     return folders, unavailable
 
 
-def detect_foobar_env(custom_fb_dir: str = '') -> FoobarEnv:
+def detect_foobar_env(custom_fb_dir: str = '') -> PlayerEnv:
     """自动发现 foobar2000 路径、profile 与媒体库目录。"""
     cands = ([custom_fb_dir] if custom_fb_dir and os.path.isdir(custom_fb_dir) else []) + [
         os.path.dirname(e) for e in get_running_foobar_exes()
@@ -169,8 +134,12 @@ def detect_foobar_env(custom_fb_dir: str = '') -> FoobarEnv:
                 profile_dir = p
                 break
 
-    env = FoobarEnv(
-        fb_exe=fb_exe, fb_dir=fb_dir, profile_dir=profile_dir,
+    env = PlayerEnv(
+        player_type=PLAYER_TYPE_FOOBAR,
+        player_name='foobar2000',
+        exe_path=fb_exe,
+        app_dir=fb_dir,
+        config_dir=profile_dir,
         reload_command=_detect_reload_command(fb_exe) if fb_exe else '标签/从文件重新载入信息',
     )
     if profile_dir:
@@ -201,10 +170,10 @@ def _parse_metadb_info(blob: bytes | None) -> dict[str, list[str]]:
     return tags
 
 
-def load_metadb_index(env: FoobarEnv) -> dict[str, dict]:
+def load_metadb_index(env: PlayerEnv) -> dict[str, dict]:
     """只读加载 metadb.sqlite，返回 {normcase_path: {...}}。"""
     result: dict[str, dict] = {}
-    db_path = os.path.join(env.profile_dir, 'metadb.sqlite') if env.profile_dir else ''
+    db_path = os.path.join(env.config_dir, 'metadb.sqlite') if env.config_dir else ''
     if not db_path or not os.path.isfile(db_path):
         return result
 
@@ -233,7 +202,7 @@ def load_metadb_index(env: FoobarEnv) -> dict[str, dict]:
             except OSError:
                 pass
 
-    base_dir = env.fb_dir or env.profile_dir
+    base_dir = env.app_dir or env.config_dir
     for name, info_blob, size, lm in rows:
         if not name or not name.startswith('0+'):
             continue
@@ -250,10 +219,12 @@ def load_metadb_index(env: FoobarEnv) -> dict[str, dict]:
             'albumartist': ', '.join(tags.get('album artist') or tags.get('albumartist') or []),
             'date': ', '.join(tags.get('date') or []),
             'composer': ', '.join(tags.get('composer') or []),
+            'lyricist': ', '.join(tags.get('lyricist') or tags.get('text writer') or tags.get('words') or []),
+            'arranger': ', '.join(tags.get('arranger') or tags.get('arrangement') or []),
             'performer': ', '.join(tags.get('performer') or []),
             'genre': ', '.join(tags.get('genre') or []),
             'discnumber': ', '.join(tags.get('discnumber') or []),
-            'comment': ', '.join(tags.get('comment') or []),
+            'comment': ', '.join(tags.get('comment') or tags.get('comment id3v1 comment') or []),
         }
     return result
 
@@ -286,7 +257,8 @@ def find_foobar_cache_diffs(
 
     for key, label in (
         ('title', '标题'), ('artist', '艺术家'), ('album', '专辑'), ('albumartist', '专辑艺术家'),
-        ('date', '日期'), ('composer', '作曲'), ('performer', '表演者'), ('genre', '流派'),
+        ('date', '日期'), ('composer', '作曲'), ('lyricist', '作词'), ('arranger', '编曲'),
+        ('performer', '表演者'), ('genre', '流派'),
     ):
         disk_val = _norm_cmp(info.get(key) or '')
         if disk_val and _norm_cmp(fb_entry.get(key) or '') != disk_val:
@@ -306,7 +278,7 @@ def find_foobar_cache_diffs(
 
 
 def scan_library(
-    env: FoobarEnv | None = None,
+    env: PlayerEnv | None = None,
     folders: list[str] | None = None,
     progress_cb=None,
     include_art_scan: bool = True,
@@ -323,30 +295,66 @@ def scan_library(
 
 
 def sync_files_to_foobar(
-    env: FoobarEnv,
+    env: PlayerEnv,
     paths: list[str],
     foobar_mtimes: dict[str, float] | None = None,
+    *,
+    auto_start: bool = True,
+    batch_size: int = 60,
 ) -> tuple[int, bool]:
-    """推进修改时间，并在 foobar2000 运行时触发重载元数据。"""
+    """触发 foobar2000 重载元数据缓存；若未运行且允许自动启动，尝试唤起 foobar2000。"""
     valid_paths = [p for p in paths if p and os.path.isfile(p)]
     if not valid_paths:
         return 0, False
 
-    touched = touch_files_mtime(valid_paths, foobar_mtimes)
     running = get_running_foobar_exes()
+    if not running and auto_start and env.exe_path and os.path.isfile(env.exe_path):
+        try:
+            subprocess.Popen([env.exe_path])
+            import time
+            for _ in range(15):
+                time.sleep(0.2)
+                running = get_running_foobar_exes()
+                if running:
+                    time.sleep(0.5)
+                    break
+        except Exception:
+            running = []
+
     reloaded = False
-    if running and env.fb_exe and os.path.isfile(env.fb_exe):
+    if running and env.exe_path and os.path.isfile(env.exe_path):
         cmd_arg = f'/context_command:{env.reload_command}'
-        for i in range(0, len(valid_paths), 20):
+        for i in range(0, len(valid_paths), batch_size):
+            batch = valid_paths[i:i + batch_size]
             try:
                 subprocess.run(
-                    [env.fb_exe, cmd_arg, *valid_paths[i:i + 20]],
-                    timeout=3.0, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    [env.exe_path, cmd_arg, *batch],
+                    timeout=15.0, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                     creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0),
                 )
                 reloaded = True
             except Exception:
-                break
-        if touched > 0:
-            reloaded = True
-    return touched, reloaded
+                pass
+
+    touched = touch_files_mtime(valid_paths, foobar_mtimes) if not reloaded else 0
+    return (len(valid_paths) if reloaded else touched), reloaded
+
+
+class FoobarAdapter(BasePlayerAdapter):
+    """foobar2000 播放器适配器。"""
+
+    player_type: str = PLAYER_TYPE_FOOBAR
+    player_name: str = 'foobar2000'
+
+    def detect_env(self, custom_dir: str = '') -> PlayerEnv:
+        return detect_foobar_env(custom_dir)
+
+    def is_running(self) -> bool:
+        return len(get_running_foobar_exes()) > 0
+
+    def get_library_folders(self, env: PlayerEnv) -> tuple[list[str], list[str]]:
+        return env.library_folders, env.unavailable_folders
+
+    def notify_reload(self, env: PlayerEnv, paths: list[str]) -> tuple[int, bool]:
+        return sync_files_to_foobar(env, paths)
+

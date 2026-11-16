@@ -100,6 +100,70 @@ class TempTrackTestCase(unittest.TestCase):
             fp.write(riff)
         return path
 
+    def _make_minimal_dsf(self, filename: str = 'test.dsf') -> str:
+        dsd_chunk = b'DSD ' + struct.pack('<QQQ', 28, 28 + 52 + 12 + 8192, 0)
+        fmt_chunk = b'fmt ' + struct.pack('<QIIIIIIQII', 52, 1, 0, 2, 2, 2822400, 1, 2822400, 4096, 0)
+        data_payload = b'\x00' * 8192
+        data_chunk = b'data' + struct.pack('<Q', 12 + len(data_payload)) + data_payload
+        path = os.path.join(self.tmp, filename)
+        with open(path, 'wb') as fp:
+            fp.write(dsd_chunk + fmt_chunk + data_chunk)
+        return path
+
+    def _make_minimal_tta(self, filename: str = 'test.tta') -> str:
+        import zlib
+        header_no_crc = b'TTA1' + struct.pack('<HHHII', 1, 2, 16, 44100, 44100)
+        crc = zlib.crc32(header_no_crc)
+        path = os.path.join(self.tmp, filename)
+        with open(path, 'wb') as fp:
+            fp.write(header_no_crc + struct.pack('<I', crc))
+        return path
+
+    def _make_minimal_mpc(self, filename: str = 'test.mpc') -> str:
+        hdr = b'MP+\x07' + struct.pack('<IIHhHh', 100, 0, 0, 0, 0, 0) + b'\x00' * 12
+        path = os.path.join(self.tmp, filename)
+        with open(path, 'wb') as fp:
+            fp.write(hdr)
+        return path
+
+    def _make_minimal_tak(self, filename: str = 'test.tak') -> str:
+        bits = [0] * (14 * 8)
+        def write_bits(offset, val, count):
+            for i in range(count):
+                bits[offset + i] = (val >> i) & 1
+        write_bits(14, 44100, 35)
+        write_bits(52, 38100, 18)
+        write_bits(70, 8, 5)
+        write_bits(75, 1, 4)
+        stream_info_bytes = bytearray(14)
+        for i in range(14):
+            b = 0
+            for j in range(8):
+                b |= (bits[i * 8 + j] << j)
+            stream_info_bytes[i] = b
+        end_chunk = b'\x00' + (4).to_bytes(3, 'little') + b'\x00\x00\x00\x00'
+        raw = b'tBaK\x01' + (14).to_bytes(3, 'little') + bytes(stream_info_bytes) + end_chunk
+        path = os.path.join(self.tmp, filename)
+        with open(path, 'wb') as fp:
+            fp.write(raw)
+        return path
+
+    def _make_minimal_dff(self, filename: str = 'test.dff') -> str:
+        fs_chunk = b'FS  ' + struct.pack('>Q', 4) + struct.pack('>I', 2822400)
+        chnl_data = struct.pack('>H', 2) + b'SLFTSRGT'
+        chnl_chunk = b'CHNL' + struct.pack('>Q', len(chnl_data)) + chnl_data
+        cmpr_chunk = b'CMPR' + struct.pack('>Q', 4) + b'DSD '
+        prop_payload = b'SND ' + fs_chunk + chnl_chunk + cmpr_chunk
+        prop_chunk = b'PROP' + struct.pack('>Q', len(prop_payload)) + prop_payload
+        raw_audio = b'\x55\xAA' * 4096
+        dsd_chunk = b'DSD ' + struct.pack('>Q', len(raw_audio)) + raw_audio
+        frm8_payload = b'DSD ' + prop_chunk + dsd_chunk
+        frm8_chunk = b'FRM8' + struct.pack('>Q', len(frm8_payload)) + frm8_payload
+        path = os.path.join(self.tmp, filename)
+        with open(path, 'wb') as fp:
+            fp.write(frm8_chunk)
+        return path
+
     @staticmethod
     def _make_jpeg_bytes(width: int = 200, height: int = 200, color: tuple[int, int, int] = (40, 120, 200)) -> bytes:
         im = Image.new('RGB', (width, height), color)

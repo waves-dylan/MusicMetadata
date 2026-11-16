@@ -3,6 +3,7 @@
 import gzip
 import http.server
 import json
+import os
 import socketserver
 import threading
 import time
@@ -177,6 +178,94 @@ class TestOnlinePerfOptimizations(unittest.TestCase):
         self.assertFalse(ne.is_available)
         reset_all_circuit_breakers()
         self.assertTrue(ne.is_available)
+
+
+class TestPipelinedAlbumExecution(unittest.TestCase):
+    """验证按专辑流水线（Per-Album Pipelining）边查边写与重叠并发特性。"""
+
+    def setUp(self):
+        import tempfile, shutil
+        clear_caches()
+        self.tmp = tempfile.mkdtemp(prefix='pipe_test_')
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _make_flac(self, folder: str, name: str) -> str:
+        import struct
+        si = bytearray(34)
+        struct.pack_into('>HH', si, 0, 4096, 4096)
+        val = (44100 << 44) | (1 << 41) | (15 << 36) | 44100
+        struct.pack_into('>Q', si, 10, val)
+        p = os.path.join(folder, name)
+        with open(p, 'wb') as fp:
+            fp.write(b'fLaC' + struct.pack('>I', 0x80000022) + bytes(si))
+        return p
+
+    def test_per_album_pipelined_streaming_execution(self):
+        from core.models import PlayerEnv
+        from pipelines.options import FixOptions
+        from pipelines.repair import execute_repairs
+        from tag_io import read_audio_info
+
+        dir_fast = os.path.join(self.tmp, 'FastAlbumDir')
+        dir_slow = os.path.join(self.tmp, 'SlowAlbumDir')
+        os.makedirs(dir_fast, exist_ok=True)
+        os.makedirs(dir_slow, exist_ok=True)
+
+        f1 = self._make_flac(dir_fast, '01.flac')
+        f2 = self._make_flac(dir_fast, '02.flac')
+        s1 = self._make_flac(dir_slow, '01.flac')
+        s2 = self._make_flac(dir_slow, '02.flac')
+
+        t_fast1 = LibraryTrack(path=f1, filename='01.flac', folder=dir_fast, album='FastAlbum', title='F1', needs_tracknumber=True, needs_date=True)
+        t_fast2 = LibraryTrack(path=f2, filename='02.flac', folder=dir_fast, album='FastAlbum', title='F2', needs_tracknumber=True, needs_date=True)
+        t_slow1 = LibraryTrack(path=s1, filename='01.flac', folder=dir_slow, album='SlowAlbum', title='S1', needs_tracknumber=True, needs_date=True)
+        t_slow2 = LibraryTrack(path=s2, filename='02.flac', folder=dir_slow, album='SlowAlbum', title='S2', needs_tracknumber=True, needs_date=True)
+
+        tracks = [t_fast1, t_fast2, t_slow1, t_slow2]
+        fix_events: list[tuple[str, float]] = []
+
+        def fake_resolve(tr, **_kw):
+            if 'FastAlbum' in tr.folder or tr.album == 'FastAlbum':
+                time.sleep(0.01)
+                return TrackMatch(tracknumber=1 if '01' in tr.filename else 2, release_date='2020-01-01', source='fake_fast', album_name='FastAlbum')
+            else:
+                time.sleep(0.3)
+                return TrackMatch(tracknumber=1 if '01' in tr.filename else 2, release_date='2021-02-02', source='fake_slow', album_name='SlowAlbum')
+
+        def on_row(path, payload):
+            if payload.get('status_text') == '已修复':
+                fix_events.append((path, time.monotonic()))
+
+        env = PlayerEnv(library_folders=[dir_fast, dir_slow])
+        opts = FixOptions(enable_art=False, enable_tags=True, enable_sync=False)
+
+        with patch('pipelines.repair.resolve_hook', return_value=fake_resolve):
+            summary = execute_repairs(env, tracks, opts, row_cb=on_row)
+
+        self.assertFalse(summary['cancelled'])
+        self.assertEqual(summary['written_ok'], 4)
+        self.assertEqual(summary['date_fixed'], 4)
+        self.assertEqual(len(fix_events), 4)
+
+        # 验证 fast 专辑的曲目先于 slow 专辑全部完成写入
+        fast_paths = {f1, f2}
+        slow_paths = {s1, s2}
+        first_two_paths = {fix_events[0][0], fix_events[1][0]}
+        last_two_paths = {fix_events[2][0], fix_events[3][0]}
+        self.assertEqual(first_two_paths, fast_paths)
+        self.assertEqual(last_two_paths, slow_paths)
+
+        # 验证 fast 专辑完成写入与 slow 专辑完成写入之间有明显的并发流式时间差
+        fast_done_time = max(fix_events[0][1], fix_events[1][1])
+        slow_start_time = min(fix_events[2][1], fix_events[3][1])
+        self.assertGreaterEqual(slow_start_time - fast_done_time, 0.15)
+
+        # 验证文件标签真实写入成功且符合各专辑独立传播结果
+        self.assertEqual(read_audio_info(f1)['date'], '2020-01-01')
+        self.assertEqual(read_audio_info(s1)['date'], '2021-02-02')
 
 
 if __name__ == '__main__':

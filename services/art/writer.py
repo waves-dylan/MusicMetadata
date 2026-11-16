@@ -7,7 +7,7 @@ from base64 import b64decode, b64encode
 from collections.abc import Iterable
 
 from mutagen.flac import FLAC, Picture
-from mutagen.id3 import APIC, COMM, ID3, TALB, TCOM, TCON, TDRC, TIT2, TPE1, TPE2, TXXX, USLT
+from mutagen.id3 import APIC, COMM, ID3, TALB, TCOM, TCON, TDRC, TEXT, TIT2, TPE1, TPE2, TXXX, USLT
 from mutagen.mp4 import MP4, MP4Cover
 
 from core.constants import (
@@ -46,32 +46,38 @@ from tag_io import (
 _TAG_WRITE_TABLE = {
     'vorbis': {
         'album': 'ALBUM', 'albumartist': 'ALBUMARTIST', 'artist': 'ARTIST', 'title': 'TITLE',
-        'date': 'DATE', 'composer': 'COMPOSER', 'genre': 'GENRE', 'comment': 'COMMENT',
+        'date': 'DATE', 'composer': 'COMPOSER', 'lyricist': 'LYRICIST', 'arranger': 'ARRANGER',
+        'genre': 'GENRE', 'comment': 'COMMENT',
     },
     'mp4': {
         'album': '\xa9alb', 'albumartist': 'aART', 'artist': '\xa9ART', 'title': '\xa9nam',
-        'date': '\xa9day', 'composer': '\xa9wrt', 'genre': '\xa9gen', 'comment': '\xa9cmt',
+        'date': '\xa9day', 'composer': '\xa9wrt', 'lyricist': '----:com.apple.iTunes:LYRICIST',
+        'arranger': '----:com.apple.iTunes:ARRANGER', 'genre': '\xa9gen', 'comment': '\xa9cmt',
     },
     'asf': {
         'album': 'WM/AlbumTitle', 'albumartist': 'WM/AlbumArtist', 'artist': 'Author', 'title': 'Title',
-        'date': 'WM/Year', 'composer': 'WM/Composer', 'genre': 'WM/Genre', 'comment': 'Description',
+        'date': 'WM/Year', 'composer': 'WM/Composer', 'lyricist': 'WM/Writer', 'arranger': 'WM/Arranger',
+        'genre': 'WM/Genre', 'comment': 'Description',
     },
     'ape': {
         'album': 'Album', 'albumartist': 'Album Artist', 'artist': 'Artist', 'title': 'Title',
-        'date': 'Year', 'composer': 'Composer', 'genre': 'Genre', 'comment': 'Comment',
+        'date': 'Year', 'composer': 'Composer', 'lyricist': 'Lyricist', 'arranger': 'Arranger',
+        'genre': 'Genre', 'comment': 'Comment',
     },
 }
 
 _ID3_WRITE_TABLE = {
     'album': ('TALB', TALB), 'albumartist': ('TPE2', TPE2), 'artist': ('TPE1', TPE1),
-    'title': ('TIT2', TIT2), 'date': ('TDRC', TDRC), 'composer': ('TCOM', TCOM), 'genre': ('TCON', TCON),
+    'title': ('TIT2', TIT2), 'date': ('TDRC', TDRC), 'composer': ('TCOM', TCOM),
+    'lyricist': ('TEXT', TEXT), 'genre': ('TCON', TCON),
 }
 
 _TAG_DELETE_KEYS = {
     'vorbis': {
         'title': ('TITLE',), 'artist': ('ARTIST',), 'albumartist': ('ALBUMARTIST', 'ALBUM ARTIST'),
         'album': ('ALBUM',), 'date': ('DATE', 'YEAR'),
-        'composer': ('COMPOSER',), 'performer': ('PERFORMER',), 'genre': ('GENRE',),
+        'composer': ('COMPOSER',), 'lyricist': ('LYRICIST', 'TEXT WRITER', 'WORDS'),
+        'arranger': ('ARRANGER', 'ARRANGEMENT'), 'performer': ('PERFORMER',), 'genre': ('GENRE',),
         'tracknumber': ('TRACKNUMBER', 'TRACK'), 'discnumber': ('DISCNUMBER', 'DISC'),
         'comment': ('COMMENT', 'DESCRIPTION'),
         'lyrics': ('LYRICS', 'UNSYNCEDLYRICS', 'UNSYNCED LYRICS'),
@@ -79,14 +85,17 @@ _TAG_DELETE_KEYS = {
     'mp4': {
         'title': ('\xa9nam',), 'artist': ('\xa9ART',), 'albumartist': ('aART',),
         'album': ('\xa9alb',), 'date': ('\xa9day',),
-        'composer': ('\xa9wrt',), 'performer': ('----:com.apple.iTunes:PERFORMER',), 'genre': ('\xa9gen',),
+        'composer': ('\xa9wrt',), 'lyricist': ('----:com.apple.iTunes:LYRICIST',),
+        'arranger': ('----:com.apple.iTunes:ARRANGER',),
+        'performer': ('----:com.apple.iTunes:PERFORMER',), 'genre': ('\xa9gen',),
         'tracknumber': ('trkn',), 'discnumber': ('disk',), 'comment': ('\xa9cmt',),
         'lyrics': ('\xa9lyr',),
     },
     'asf': {
         'title': ('Title',), 'artist': ('Author',), 'albumartist': ('WM/AlbumArtist',),
         'album': ('WM/AlbumTitle',), 'date': ('WM/Year',),
-        'composer': ('WM/Composer',), 'performer': ('WM/Performer', 'Performer'), 'genre': ('WM/Genre',),
+        'composer': ('WM/Composer',), 'lyricist': ('WM/Writer', 'WM/Lyricist'),
+        'arranger': ('WM/Arranger',), 'performer': ('WM/Performer', 'Performer'), 'genre': ('WM/Genre',),
         'tracknumber': ('WM/TrackNumber',), 'discnumber': ('WM/PartOfSet',), 'comment': ('Description',),
         'lyrics': ('WM/Lyrics',),
     },
@@ -94,6 +103,7 @@ _TAG_DELETE_KEYS = {
         'title': ('Title', 'TITLE'), 'artist': ('Artist', 'ARTIST'),
         'albumartist': ('Album Artist', 'ALBUM ARTIST', 'ALBUMARTIST'), 'album': ('Album', 'ALBUM'),
         'date': ('Year', 'DATE'), 'composer': ('Composer', 'COMPOSER'),
+        'lyricist': ('Lyricist', 'LYRICIST'), 'arranger': ('Arranger', 'ARRANGER'),
         'performer': ('Performer', 'PERFORMER'), 'genre': ('Genre', 'GENRE'),
         'tracknumber': ('Track', 'TRACK', 'TRACKNUMBER'),
         'discnumber': ('Disc', 'DISC', 'DISCNUMBER'), 'comment': ('Comment', 'COMMENT'),
@@ -103,7 +113,7 @@ _TAG_DELETE_KEYS = {
 
 _ID3_DELETE_KEYS = {
     'title': ('TIT2',), 'artist': ('TPE1',), 'albumartist': ('TPE2',), 'album': ('TALB',),
-    'date': ('TDRC', 'TYER', 'TDAT'), 'composer': ('TCOM',), 'genre': ('TCON',),
+    'date': ('TDRC', 'TYER', 'TDAT'), 'composer': ('TCOM',), 'lyricist': ('TEXT',), 'genre': ('TCON',),
     'tracknumber': ('TRCK',), 'discnumber': ('TPOS',), 'lyrics': ('USLT',),
 }
 
@@ -119,6 +129,79 @@ _PIC_TAG_KEYS = {
     'mp4': ('covr',),
     'asf': ('wm/picture',),
     'ape': ('cover art (front)', 'cover art (back)'),
+}
+
+_ROON_MB_TAG_MAP = {
+    'musicbrainz_albumid': {
+        'vorbis': 'MUSICBRAINZ_ALBUMID',
+        'id3_txxx': 'MusicBrainz Album Id',
+        'mp4': '----:com.apple.iTunes:MusicBrainz Album Id',
+        'asf': 'MusicBrainz/Album Id',
+        'ape': 'MUSICBRAINZ_ALBUMID',
+    },
+    'musicbrainz_trackid': {
+        'vorbis': 'MUSICBRAINZ_TRACKID',
+        'id3_txxx': 'MusicBrainz Track Id',
+        'mp4': '----:com.apple.iTunes:MusicBrainz Track Id',
+        'asf': 'MusicBrainz/Track Id',
+        'ape': 'MUSICBRAINZ_TRACKID',
+    },
+    'musicbrainz_artistid': {
+        'vorbis': 'MUSICBRAINZ_ARTISTID',
+        'id3_txxx': 'MusicBrainz Artist Id',
+        'mp4': '----:com.apple.iTunes:MusicBrainz Artist Id',
+        'asf': 'MusicBrainz/Artist Id',
+        'ape': 'MUSICBRAINZ_ARTISTID',
+    },
+    'musicbrainz_releasegroupid': {
+        'vorbis': 'MUSICBRAINZ_RELEASEGROUPID',
+        'id3_txxx': 'MusicBrainz Release Group Id',
+        'mp4': '----:com.apple.iTunes:MusicBrainz Release Group Id',
+        'asf': 'MusicBrainz/Release Group Id',
+        'ape': 'MUSICBRAINZ_RELEASEGROUPID',
+    },
+    'roonalbumtag': {
+        'vorbis': 'ROONALBUMTAG',
+        'id3_txxx': 'ROONALBUMTAG',
+        'mp4': '----:com.apple.iTunes:ROONALBUMTAG',
+        'asf': 'ROONALBUMTAG',
+        'ape': 'ROONALBUMTAG',
+    },
+    'roontracktag': {
+        'vorbis': 'ROONTRACKTAG',
+        'id3_txxx': 'ROONTRACKTAG',
+        'mp4': '----:com.apple.iTunes:ROONTRACKTAG',
+        'asf': 'ROONTRACKTAG',
+        'ape': 'ROONTRACKTAG',
+    },
+    'originaldate': {
+        'vorbis': 'ORIGINALDATE',
+        'id3_txxx': 'ORIGINALDATE',
+        'mp4': '----:com.apple.iTunes:ORIGINALDATE',
+        'asf': 'WM/OriginalReleaseYear',
+        'ape': 'ORIGINALDATE',
+    },
+    'barcode': {
+        'vorbis': 'BARCODE',
+        'id3_txxx': 'BARCODE',
+        'mp4': '----:com.apple.iTunes:BARCODE',
+        'asf': 'WM/Barcode',
+        'ape': 'BARCODE',
+    },
+    'catalognumber': {
+        'vorbis': 'CATALOGNUMBER',
+        'id3_txxx': 'CATALOGNUMBER',
+        'mp4': '----:com.apple.iTunes:CATALOGNUMBER',
+        'asf': 'WM/CatalogNo',
+        'ape': 'CATALOGNUMBER',
+    },
+    'arranger': {
+        'vorbis': 'ARRANGER',
+        'id3_txxx': 'ARRANGER',
+        'mp4': '----:com.apple.iTunes:ARRANGER',
+        'asf': 'WM/Arranger',
+        'ape': 'Arranger',
+    },
 }
 
 
@@ -156,7 +239,7 @@ def apply_picture_to_audio(
             return True
         return False
 
-    if container in ('mp3', 'wav', 'aiff') or isinstance(getattr(audio, 'tags', None), ID3):
+    if container in ('mp3', 'wav', 'aiff', 'dsf', 'tta') or isinstance(getattr(audio, 'tags', None), ID3):
         old_apics = [f for f in audio.tags.getall('APIC') if getattr(f, 'type', None) != pic_type]
         audio.tags.delall('APIC')
         for f in old_apics:
@@ -190,12 +273,58 @@ def apply_artist_picture(audio, container: str, data: bytes, mime: str = 'image/
     return apply_picture_to_audio(audio, container, data, pic_type=ARTIST_PIC_TYPE, mime=mime)
 
 
+def read_custom_tag_field(audio, container: str, field_name: str) -> str:
+    """读取扩展或 Roon/MusicBrainz 自定义元数据字段。"""
+    tags = getattr(audio, 'tags', None)
+    if tags is None:
+        return ''
+    norm_fn = field_name.lower().replace('-', '_').replace(' ', '_')
+    if norm_fn in _ROON_MB_TAG_MAP:
+        mapped = _ROON_MB_TAG_MAP[norm_fn]
+        if container in ('mp3', 'wav', 'aiff', 'dsf', 'tta') or isinstance(tags, ID3):
+            txxx_desc = mapped['id3_txxx'].lower()
+            for f in tags.getall('TXXX'):
+                if str(getattr(f, 'desc', '') or '').strip().lower() == txxx_desc:
+                    return _as_text(getattr(f, 'text', None))
+            return ''
+        fam = _container_family(audio, container)
+        t_key = mapped.get(fam)
+        if t_key and t_key in tags:
+            val = tags[t_key]
+            if isinstance(val, (list, tuple)) and val:
+                v = val[0]
+                if isinstance(v, (bytes, bytearray)):
+                    return v.decode('utf-8', errors='replace').strip()
+                return str(v).strip()
+            return str(val).strip()
+    return ''
+
+
 def apply_tag_field(audio, container: str, field_name: str, value: str) -> bool:
     if not value:
         return False
     tags = ensure_tags(audio)
     if tags is None:
         return False
+
+    norm_fn = field_name.lower().replace('-', '_').replace(' ', '_')
+    if norm_fn in _ROON_MB_TAG_MAP:
+        mapped = _ROON_MB_TAG_MAP[norm_fn]
+        if container in ('mp3', 'wav', 'aiff', 'dsf', 'tta') or isinstance(tags, ID3):
+            txxx_desc = mapped['id3_txxx']
+            kept = [f for f in tags.getall('TXXX') if str(getattr(f, 'desc', '') or '').strip().lower() != txxx_desc.lower()]
+            tags.setall('TXXX', kept + [TXXX(encoding=3, desc=txxx_desc, text=[value])])
+            return True
+        fam = _container_family(audio, container)
+        t_key = mapped.get(fam)
+        if t_key:
+            if fam == 'mp4':
+                tags[t_key] = [value.encode('utf-8')]
+            else:
+                tags[t_key] = [value]
+            return True
+        return False
+
     fam = container_family(audio, container)
     if fam == 'id3':
         if field_name == 'comment':
@@ -214,7 +343,10 @@ def apply_tag_field(audio, container: str, field_name: str, value: str) -> bool:
         return False
     if field_name == 'comment' and '163 key' in _as_text(tags.get(key)):
         return False
-    tags[key] = [value]
+    if fam == 'mp4' and str(key).startswith('----:'):
+        tags[key] = [value.encode('utf-8')]
+    else:
+        tags[key] = [value]
     return True
 
 
@@ -252,6 +384,9 @@ def apply_track_repairs(
     overwrite_track: bool = False,
     lyrics: str | None = None,
     lyrics_mode: str = 'auto',
+    lrc_title: str = '',
+    lrc_artist: str = '',
+    lrc_album: str = '',
 ) -> tuple[bool, str]:
     """在单次原子临时副本上合并执行标签补全、封面/艺术家规范、歌词写入与音轨/碟号写入。"""
     tag_updates = dict(tag_updates or {})
@@ -275,20 +410,25 @@ def apply_track_repairs(
     if lmode not in LYRICS_MODES:
         lmode = 'auto'
     container = state.get('container') or ''
+    can_embed = (container in SUPPORTS_EMBEDDED_LYRICS)
     want_embed_lyrics = False
     want_lrc_file = False
     if lyrics_txt:
         if lmode == 'auto':
-            if container in PREFER_EXTERNAL_LRC_CONTAINERS:
+            if container in PREFER_EXTERNAL_LRC_CONTAINERS or not can_embed:
                 want_lrc_file = True
             else:
                 want_embed_lyrics = True
         elif lmode == 'embed':
-            want_embed_lyrics = True
+            if can_embed:
+                want_embed_lyrics = True
+            else:
+                want_lrc_file = True  # 不支持内嵌歌词的容器（如 DFF），平滑降级写入外置 .lrc
         elif lmode == 'lrc':
             want_lrc_file = True
         elif lmode == 'both':
-            want_embed_lyrics = True
+            if can_embed:
+                want_embed_lyrics = True
             want_lrc_file = True
 
     if not tag_updates and cover_bytes is None and artist_bytes is None and write_tn is None and write_dn is None and not want_embed_lyrics and not want_lrc_file:
@@ -335,6 +475,12 @@ def apply_track_repairs(
             return False, '碟片编号校验失败'
         for fn in applied_fields:
             got_val = (chk_info.get(fn) or '').strip()
+            if not got_val and fn in _ROON_MB_TAG_MAP and c_type in LOADERS:
+                try:
+                    chk_audio = LOADERS[c_type](chk_path)
+                    got_val = read_custom_tag_field(chk_audio, c_type, fn)
+                except Exception:
+                    got_val = ''
             if not got_val or (fn == 'date' and got_val != str(tag_updates.get('date') or '').strip()):
                 return False, f'{fn}标签写回校验失败'
         if wrote_embedded_lyrics and not chk_info.get('has_embedded_lyrics'):
@@ -355,20 +501,25 @@ def apply_track_repairs(
 
     parts: list[str] = []
     if tag_updates or cover_bytes is not None or artist_bytes is not None or write_tn is not None or write_dn is not None or want_embed_lyrics:
-        ok, msg = atomic_mutate_audio(path, _mutate, verify_fn=_verify)
-        if not ok:
-            return False, msg
-        cleanup_stale_musictmp_for(path)
-        if msg and msg != '无需改写':
-            parts.append(msg)
+        if container == 'dff':
+            if not want_lrc_file:
+                return False, 'DFF 格式遵循发烧规范保护，不支持直接内嵌写标，请使用同目录 cover/lrc 资产或转封装为 .dsf'
+            parts.append('DFF 格式保护跳过内嵌改写')
+        else:
+            ok, msg = atomic_mutate_audio(path, _mutate, verify_fn=_verify)
+            if not ok:
+                return False, msg
+            cleanup_stale_musictmp_for(path)
+            if msg and msg != '无需改写':
+                parts.append(msg)
 
     if want_lrc_file:
         ok_lrc, msg_lrc = write_lrc_file(
             path,
             lyrics_txt,
-            title=tag_updates.get('title') or state.get('title') or '',
-            artist=tag_updates.get('artist') or state.get('artist') or '',
-            album=tag_updates.get('album') or state.get('album') or '',
+            title=lrc_title or tag_updates.get('title') or state.get('title') or '',
+            artist=lrc_artist or tag_updates.get('artist') or state.get('artist') or '',
+            album=lrc_album or tag_updates.get('album') or state.get('album') or '',
             overwrite=True,
         )
         if not ok_lrc:
@@ -513,7 +664,24 @@ def delete_tag_field_from_audio(
     if tags is None:
         return False
 
-    if container in ('mp3', 'wav', 'aiff') or isinstance(tags, ID3):
+    norm_del = field_name.lower().replace('-', '_').replace(' ', '_')
+    if norm_del in _ROON_MB_TAG_MAP:
+        mapped = _ROON_MB_TAG_MAP[norm_del]
+        if container in ('mp3', 'wav', 'aiff', 'dsf', 'tta') or isinstance(tags, ID3):
+            txxx_desc = mapped['id3_txxx'].lower()
+            kept = [f for f in tags.getall('TXXX') if str(getattr(f, 'desc', '') or '').strip().lower() != txxx_desc]
+            if len(kept) != len(tags.getall('TXXX')):
+                tags.setall('TXXX', kept)
+                return True
+            return False
+        fam = _container_family(audio, container)
+        t_key = mapped.get(fam)
+        if t_key and t_key in tags:
+            del tags[t_key]
+            return True
+        return False
+
+    if container in ('mp3', 'wav', 'aiff', 'dsf', 'tta') or isinstance(tags, ID3):
         if field_name == 'performer':
             removed = False
             kept_txxx = []
@@ -727,6 +895,10 @@ _SET_FIELD_ALIASES = {
     '日期': 'date',
     '年份': 'date',
     '作曲': 'composer',
+    '作词': 'lyricist',
+    '词': 'lyricist',
+    '填词': 'lyricist',
+    '编曲': 'arranger',
     '表演者': 'performer',
     '流派': 'genre',
     '音轨号': 'tracknumber',
@@ -806,6 +978,22 @@ def _set_num_pair_tag(tags, fam: str, field_name: str, val: str) -> tuple[bool, 
 
 def _set_custom_tag(tags, fam: str, key: str, val: str) -> tuple[bool, str]:
     clean = key.strip()
+    norm_k = clean.lower().replace('-', '_').replace(' ', '_')
+    mapped = _ROON_MB_TAG_MAP.get(norm_k)
+    if mapped:
+        if fam == 'id3':
+            _set_id3_txxx(tags, mapped['id3_txxx'], val)
+            return True, ''
+        if fam == 'vorbis':
+            tags[mapped['vorbis']] = [val]
+            return True, ''
+        if fam == 'mp4':
+            tags[mapped['mp4']] = [val.encode('utf-8')]
+            return True, ''
+        if fam in ('asf', 'ape'):
+            tags[mapped.get(fam, clean)] = [val]
+            return True, ''
+
     if fam == 'id3':
         _set_id3_txxx(tags, clean, val)
         return True, ''
@@ -948,9 +1136,10 @@ def _extract_cover_for_conversion(path: str, container: str) -> tuple[bytes | No
         return None, 'image/jpeg'
     pics = read_pictures(audio, container)
     if pics:
-        fronts = [p for p in pics if p['type'] == COVER_FRONT_TYPE] or pics
-        return fronts[0]['data'], fronts[0]['mime'] or 'image/jpeg'
-    if container in ('ape', 'wv') and getattr(audio, 'tags', None):
+        fronts = [p for p in pics if p['type'] == COVER_FRONT_TYPE] or [p for p in pics if p['type'] not in (ARTIST_PIC_TYPE, 7, 8, 9, 10, 11, 12, 19)]
+        if fronts:
+            return fronts[0]['data'], fronts[0]['mime'] or 'image/jpeg'
+    if container in ('ape', 'wv', 'tak', 'mpc') and getattr(audio, 'tags', None):
         for k in ('Cover Art (front)', 'Cover Art (Front)', 'Cover Art (back)'):
             raw = audio.tags.get(k)
             if raw is None:
@@ -995,7 +1184,7 @@ def convert_track_format(
         if src_info.get('has_embedded_lyrics') and src_info.get('lyrics') and not dst_info.get('has_embedded_lyrics'):
             if apply_lyrics_to_audio(audio, out_container, src_info['lyrics']):
                 changed = True
-        for fld in ('title', 'artist', 'albumartist', 'album', 'date', 'composer', 'performer', 'genre', 'comment'):
+        for fld in ('title', 'artist', 'albumartist', 'album', 'date', 'composer', 'lyricist', 'arranger', 'performer', 'genre', 'comment'):
             val = (src_info.get(fld) or '').strip()
             if val and not (dst_info.get(fld) or '').strip():
                 ok_s, _ = apply_set_tag_to_audio(audio, out_container, fld, val, protect_163_key=False)
@@ -1010,7 +1199,7 @@ def convert_track_format(
             if ok_s:
                 changed = True
         if changed:
-            audio.save(v2_version=3) if out_container == 'mp3' else audio.save()
+            audio.save(v2_version=3) if out_container in ('mp3', 'dsf', 'tta') else audio.save()
         return True, ''
 
     return convert_audio_file(

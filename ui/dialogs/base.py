@@ -24,13 +24,22 @@ def _msgbox():
 class _ModalDialog:
     """模态弹窗公共基类：统一窗口初始化、Esc 关闭与底部确认/取消按钮栏。"""
 
-    def __init__(self, parent: tk.Misc, title: str, intro: str = '', *, wraplength: int = 0, bold_intro: bool = True):
+    def __init__(
+        self,
+        parent: tk.Misc,
+        title: str,
+        intro: str = '',
+        *,
+        wraplength: int = 0,
+        bold_intro: bool = True,
+        resizable: bool = False,
+    ):
         self.result = None
         self.top = tk.Toplevel(parent)
         self.top.title(title)
         self.top.transient(parent)
         self.top.grab_set()
-        self.top.resizable(False, False)
+        self.top.resizable(resizable, resizable)
         self.top.protocol('WM_DELETE_WINDOW', self._on_cancel)
         self.top.bind('<Escape>', lambda _e: self._on_cancel())
 

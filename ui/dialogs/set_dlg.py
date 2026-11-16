@@ -15,7 +15,14 @@ from ui.dialogs.base import _ModalDialog, _msgbox
 class SetMetadataDialog(_ModalDialog):
     """批量手工设置标准字段或自定义元数据标签的模态弹窗。"""
 
-    def __init__(self, parent: tk.Misc, targets: list[LibraryTrack], default_sync: bool = True, *, has_foobar: bool = True):
+    def __init__(
+        self,
+        parent: tk.Misc,
+        targets: list[LibraryTrack],
+        default_sync: bool = True,
+        *,
+        has_player: bool = True,
+    ):
         self.targets = targets
         self._items: dict[str, str] = {}
         super().__init__(
@@ -57,8 +64,8 @@ class SetMetadataDialog(_ModalDialog):
         self.var_sync = tk.BooleanVar(value=default_sync)
         self.var_dry_run = tk.BooleanVar(value=False)
         ttk.Checkbutton(opt_frm, text="保护网易云 163 key（不覆盖内嵌 163 key 注释）", variable=self.var_protect_163).pack(anchor='w', pady=2)
-        self.chk_sync = ttk.Checkbutton(opt_frm, text='写入后刷新 foobar2000 缓存', variable=self.var_sync)
-        if has_foobar:
+        self.chk_sync = ttk.Checkbutton(opt_frm, text='写入后刷新播放器缓存', variable=self.var_sync)
+        if has_player:
             self.chk_sync.pack(anchor='w', pady=2)
         ttk.Checkbutton(opt_frm, text='仅预演（不修改文件）', variable=self.var_dry_run).pack(anchor='w', pady=2)
 

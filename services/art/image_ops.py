@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import io
 import struct
 
@@ -22,6 +23,14 @@ _NORM_JPEG_CACHE: dict[tuple, bytes | None] = {}
 _NORM_ARTIST_JPEG_CACHE: dict[tuple, bytes | None] = {}
 
 
+def clear_image_caches() -> None:
+    """清空图像嗅探、感知哈希与规范化缓存。"""
+    _SNIFF_IMAGE_CACHE.clear()
+    _AHASH_CACHE.clear()
+    _NORM_JPEG_CACHE.clear()
+    _NORM_ARTIST_JPEG_CACHE.clear()
+
+
 def _lanczos():
     """兼容多版本 PIL 的高质量重采样算法。"""
     return getattr(getattr(Image, 'Resampling', Image), 'LANCZOS', getattr(Image, 'LANCZOS', 1))
@@ -31,7 +40,7 @@ def sniff_image(data: bytes) -> tuple[str, int, int] | None:
     """嗅探图片二进制格式与 (宽, 高) 尺寸，支持 JPEG/PNG 头部超快速解析。"""
     if not data or len(data) < 16:
         return None
-    cache_key = (len(data), data[:48], data[-48:])
+    cache_key = hashlib.md5(data).digest()
     if cache_key in _SNIFF_IMAGE_CACHE:
         return _SNIFF_IMAGE_CACHE[cache_key]
 
@@ -88,7 +97,7 @@ def normalize_jpeg(data: bytes, max_side: int = MAX_SIDE) -> bytes | None:
     """将封面规范化为最大边不超过 max_side 的优化 JPEG 数据。"""
     if not data:
         return None
-    cache_key = (len(data), data[:48], data[-48:], max_side)
+    cache_key = (hashlib.md5(data).digest(), max_side)
     if cache_key in _NORM_JPEG_CACHE:
         return _NORM_JPEG_CACHE[cache_key]
     try:
@@ -119,7 +128,7 @@ def normalize_artist_jpeg(
     """将艺术家图片规范化为最大边不超过 max_side、以质量 100 优先输出、体积严格控在 max_bytes 内的 JPEG。"""
     if not data:
         return None
-    cache_key = (len(data), data[:48], data[-48:], max_side, quality, max_bytes)
+    cache_key = (hashlib.md5(data).digest(), max_side, quality, max_bytes)
     if cache_key in _NORM_ARTIST_JPEG_CACHE:
         return _NORM_ARTIST_JPEG_CACHE[cache_key]
     try:
@@ -165,7 +174,7 @@ def ahash(data: bytes) -> int:
     """计算 64 位感知哈希值用于图片相似度快速比对。"""
     if not data:
         return 0
-    cache_key = (len(data), data[:48], data[-48:])
+    cache_key = hashlib.md5(data).digest()
     if cache_key in _AHASH_CACHE:
         return _AHASH_CACHE[cache_key]
     px = Image.open(io.BytesIO(data)).convert('L').resize((9, 8), _lanczos()).tobytes()
@@ -188,6 +197,15 @@ def ham(a: int, b: int) -> int:
 def same_art(data_a: bytes, data_b: bytes) -> bool:
     """判断两幅图像是否为相同或高度相似艺术封面。"""
     try:
-        return ham(ahash(data_a), ahash(data_b)) <= SAME_ART_DISTANCE
+        if data_a == data_b:
+            return True
+        h_a, h_b = ahash(data_a), ahash(data_b)
+        if h_a == 0 and h_b == 0:
+            im_a = Image.open(io.BytesIO(data_a)).convert('RGB')
+            im_b = Image.open(io.BytesIO(data_b)).convert('RGB')
+            col_a = im_a.resize((1, 1)).getpixel((0, 0))
+            col_b = im_b.resize((1, 1)).getpixel((0, 0))
+            return max(abs(col_a[i] - col_b[i]) for i in range(3)) <= 15
+        return ham(h_a, h_b) <= SAME_ART_DISTANCE
     except Exception:
         return False

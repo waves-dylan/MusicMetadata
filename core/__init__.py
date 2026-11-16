@@ -13,7 +13,7 @@ from core.models import (
 from core.config import (
     get_config_path,
     get_default_music_folders,
-    has_foobar_env,
+    has_player_env,
     load_user_config,
     normalize_folder_list,
     reveal_in_file_manager,

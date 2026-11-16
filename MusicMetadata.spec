@@ -3,14 +3,19 @@
 from PyInstaller.utils.hooks import collect_submodules
 
 _hidden = ['PIL.Image']
-for pkg in ('core', 'infra', 'services', 'pipelines', 'ui', 'providers'):
+for pkg in ('core', 'infra', 'services', 'pipelines', 'ui', 'providers', 'mutagen'):
     _hidden.extend(collect_submodules(pkg))
 
 a = Analysis(
     ['app.py'],
     pathex=[],
     binaries=[],
-    datas=[('assets/app_icon.ico', 'assets'), ('assets/app_icon.png', 'assets')],
+    datas=[
+        ('assets/app_icon.ico', 'assets'),
+        ('assets/app_icon.png', 'assets'),
+        ('tools/sacd_extract.exe', 'tools'),
+        ('tools/sacd_extract.cfg', 'tools'),
+    ],
     hiddenimports=_hidden,
     hookspath=[],
     hooksconfig={},

@@ -15,4 +15,5 @@ from infra.scanner.local_scanner import (
     scan_library,
     touch_files_mtime,
     track_has_pending_work,
+    track_needs_lyrics,
 )

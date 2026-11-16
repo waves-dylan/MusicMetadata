@@ -8,10 +8,12 @@ import pickle
 import re
 import time
 import urllib.request
+from typing import Callable
 
 from core.constants import ARTIST_MAX_SIDE, EMBED_MAX_SIDE
 from core.models import LibraryTrack
 from services.art.image_ops import normalize_artist_jpeg, normalize_jpeg, sniff_image
+from services.lookup.scoring import compute_album_affinity_score, rank_song_hits
 from providers import (
     ONLINE_PROVIDERS,
     PRIMARY_PROVIDERS,
@@ -19,11 +21,14 @@ from providers import (
     PROVIDER_LABELS,
     TrackMatch,
     deezer_provider,
+    discogs_provider,
     fanart_provider,
+    get_discogs_token,
     get_fanart_keys,
     get_netease_api_base,
     get_spotify_credentials,
     get_tadb_api_key,
+    has_discogs_token,
     has_spotify_credentials,
     kugou_provider,
     lrclib_provider,
@@ -31,6 +36,7 @@ from providers import (
     parse_source_list,
     qq_provider,
     resolve_provider_order,
+    set_discogs_token,
     set_fanart_keys,
     set_netease_api_base,
     set_spotify_credentials,
@@ -55,6 +61,7 @@ from providers.base import (
     match_in_tracks,
     norm_core,
     normalize_release_date,
+    parse_all_lyric_credits,
     parse_lyric_credits,
     reset_all_circuit_breakers,
     song_matches,
@@ -72,10 +79,12 @@ def clear_caches() -> None:
     bump_cache_gen()
     reset_mb_circuit()
     reset_all_circuit_breakers()
+    from services.art.image_ops import clear_image_caches
+    clear_image_caches()
 
 
 def fetch_cover_bytes(cover_url: str, timeout: int = 10) -> bytes | None:
-    """下载在线封面图并规范化为 JPEG 字节；内置 URL 内存缓存。"""
+    """下载在线封面图并规范化为 JPEG 字节；内置 URL 内存缓存（支持 Discogs 鉴权注入）。"""
     url = str(cover_url or '').strip()
     if not url or not url.startswith('http'):
         return None
@@ -83,7 +92,13 @@ def fetch_cover_bytes(cover_url: str, timeout: int = 10) -> bytes | None:
         if url in COVER_CACHE:
             return COVER_CACHE[url]
     try:
-        raw = http_get_bytes(url, timeout=timeout)
+        req_headers = None
+        if 'discogs.com' in url.lower():
+            req_headers = {'User-Agent': 'MusicMetadata/1.0 (+https://github.com/waves-dylan/MusicMetadata)'}
+            dtok = get_discogs_token()
+            if dtok:
+                req_headers['Authorization'] = f'Discogs token={dtok}'
+        raw = http_get_bytes(url, headers=req_headers, timeout=timeout)
         if not raw or not sniff_image(raw):
             return None
         jpg = normalize_jpeg(raw, EMBED_MAX_SIDE) or raw
@@ -249,7 +264,8 @@ def _extract_pkl_metadata(pkl: dict) -> dict:
     """从 musicdl .pkl 缓存中提取发布日期、封面、艺术家、作曲及歌词等可用字段。"""
     out = {
         'release_date': _extract_pkl_release_date(pkl),
-        'cover_url': '', 'title': '', 'artist': '', 'album': '', 'composer': '', 'lyrics': '',
+        'cover_url': '', 'title': '', 'artist': '', 'album': '',
+        'composer': '', 'lyricist': '', 'arranger': '', 'lyrics': '',
     }
     if not isinstance(pkl, dict):
         return out
@@ -267,8 +283,33 @@ def _extract_pkl_metadata(pkl: dict) -> dict:
             lrc = str(raw_lrc.get('lrc') or raw_lrc.get('lyric') or '')
     if lrc:
         out['lyrics'] = lrc.strip()
-        out['composer'] = parse_lyric_credits(lrc)
+        l_creds = parse_all_lyric_credits(lrc)
+        out['composer'] = l_creds.get('composer', '')
+        out['lyricist'] = l_creds.get('lyricist', '')
+        out['arranger'] = l_creds.get('arranger', '')
     return out
+
+
+def _extract_local_track_credits(track: LibraryTrack) -> dict[str, str]:
+    """尝试从音频本地已有内嵌歌词或同名 .lrc 文件中解析演职人员 (作曲/作词/编曲)。"""
+    if not track or not getattr(track, 'path', ''):
+        return {}
+    try:
+        from tag_io import read_audio_info, read_lrc_file
+        lrc = read_lrc_file(track.path)
+        if not lrc:
+            info = read_audio_info(track.path)
+            lrc = str(info.get('lyrics') or '')
+        if lrc:
+            return parse_all_lyric_credits(lrc)
+    except Exception:
+        pass
+    return {}
+
+
+def _extract_local_track_composer(track: LibraryTrack) -> str:
+    """尝试从音频本地已有内嵌歌词或同名 .lrc 文件中解析作曲者。"""
+    return _extract_local_track_credits(track).get('composer', '')
 
 
 def _load_pkl_index(directory: str) -> dict:
@@ -317,7 +358,7 @@ def _find_pkl_item(track: LibraryTrack, ident: str) -> dict | None:
 # ==================== 匹配构造与跨平台聚合 ====================
 _TEXT_MERGE_FIELDS = (
     'album_name', 'release_date', 'title', 'artist', 'albumartist',
-    'composer', 'genre', 'cover_url', 'artist_pic_url', 'lyrics',
+    'composer', 'lyricist', 'arranger', 'genre', 'cover_url', 'artist_pic_url', 'lyrics',
 )
 
 _PLAT_CAPABILITIES: dict[str, set[str]] = {
@@ -361,10 +402,13 @@ def _make_match(
         artist=str(overrides.get('artist') or tr.get('artist') or ''),
         albumartist=str(overrides.get('albumartist') or alb_meta.get('albumartist') or ''),
         composer=str(overrides.get('composer') or tr.get('composer') or ''),
+        lyricist=str(overrides.get('lyricist') or tr.get('lyricist') or ''),
+        arranger=str(overrides.get('arranger') or tr.get('arranger') or ''),
         genre=str(overrides.get('genre') or tr.get('genre') or alb_meta.get('genre') or ''),
         cover_url=str(overrides.get('cover_url') or tr.get('cover_url') or alb_meta.get('cover_url') or ''),
         artist_pic_url=str(overrides.get('artist_pic_url') or tr.get('artist_pic_url') or alb_meta.get('artist_pic_url') or ''),
         lyrics=str(overrides.get('lyrics') or ''),
+        affinity_score=float(overrides.get('affinity_score', 0.0) or 0.0),
     )
 
 
@@ -410,15 +454,20 @@ def _enrich_song_credits(
 
     if ex:
         if plat == 'qq':
-            for k in ('composer', 'genre', 'release_date'):
+            for k in ('composer', 'lyricist', 'arranger', 'genre', 'release_date'):
                 if not getattr(match, k) and ex.get(k):
                     setattr(match, k, ex[k])
-        elif need_comp and not match.composer and ex.get('composer'):
-            match.composer = ex['composer']
+        for rk in ('composer', 'lyricist', 'arranger'):
+            if not getattr(match, rk) and ex.get(rk):
+                setattr(match, rk, ex[rk])
         if not match.genre and ex.get('genre'):
             match.genre = ex['genre']
         if need_lrc and not match.lyrics and ex.get('lyrics'):
             match.lyrics = ex['lyrics']
+            lrc_c = parse_all_lyric_credits(match.lyrics)
+            for rk in ('composer', 'lyricist', 'arranger'):
+                if not getattr(match, rk) and lrc_c.get(rk):
+                    setattr(match, rk, lrc_c[rk])
     return match
 
 
@@ -427,6 +476,7 @@ def _search_song_and_resolve_album(
     *, need_track: bool = True, need_date: bool = True, need_extra: bool = False, need_lyrics: bool = False,
     skip_plats: set[str] | None = None, allow_itunes_song: bool = True,
     tried_out: set[str] | None = None, plat_order: tuple[str, ...] | None = None,
+    prefer_rich_lyrics: bool = False,
 ) -> TrackMatch | None:
     if not title:
         return None
@@ -435,6 +485,7 @@ def _search_song_and_resolve_album(
     term, tc, ac = f'{title} {artist}'.strip(), norm_core(title), norm_core(artist)
     date_fallback: TrackMatch | None = None
     dummy = track or LibraryTrack(path='', filename='', folder='')
+    target_alb_for_scoring = (dummy.album or (track.album if track else '') or '').strip()
 
     for plat in order:
         if plat in skip_plats or (plat == 'itunes' and not allow_itunes_song):
@@ -450,15 +501,28 @@ def _search_song_and_resolve_album(
         except TypeError:
             song_hits = provider.search_song_hits(term)
 
-        for hit in song_hits:
+        # 智能亲和度排序：基于专辑名相似度、首版年代、发行类型(精选/Live降权)进行智能加权重排
+        ranked_hits = rank_song_hits(
+            song_hits,
+            target_title=title,
+            target_artist=artist,
+            target_album=target_alb_for_scoring,
+            duration=duration,
+            prefer_rich_lyrics=prefer_rich_lyrics,
+        )
+
+        for hit in ranked_hits:
+            if hit.get('affinity_score', 0.0) <= -9000.0:
+                continue
             stitle, sart, sdur = hit['title'], hit['artist'], hit['duration']
             if not song_matches(stitle, sdur, sart, tc, duration, ac):
                 continue
             sid, aid, alb_name = hit['song_id'], hit['album_id'], hit['album_name']
             pub_date, cov = hit['release_date'], hit['cover_url']
+            aff_score = float(hit.get('affinity_score', 0.0) or 0.0)
 
             if plat in ('netease', 'qq', 'itunes', 'deezer', 'ytmusic', 'spotify', 'tadb'):
-                cov_kw = {'cover_url': cov} if cov and plat in ('netease', 'deezer', 'ytmusic', 'spotify', 'tadb') else {}
+                cov_kw = {'cover_url': cov} if cov else {}
                 extra_cand_kw = {}
                 if hit.get('composer'):
                     extra_cand_kw['composer'] = hit['composer']
@@ -471,20 +535,23 @@ def _search_song_and_resolve_album(
                     m = match_in_tracks(tracks, title, duration, sid)
                     if m and (need_track or not need_date or rdate):
                         cand = _make_match(plat, aid, m, len(tracks), f'{label}(单曲反查)', alb_name, release_date=rdate, **cov_kw, **extra_cand_kw)
+                        cand.affinity_score = aff_score
                         if dummy.album or alb_name:
                             cache_resolved_album(plat, dummy.album or alb_name, dummy.artist or sart, aid, alb_name)
                         return _enrich_song_credits(cand, plat, str(m.get('id') or sid), dummy, need_extra=need_extra, need_lyrics=need_lyrics)
-                    can_fb = rdate or (plat == 'netease' and (cov or need_lyrics)) or (plat == 'qq' and need_lyrics) or (plat in ('deezer', 'ytmusic', 'spotify', 'tadb') and (cov or need_lyrics or hit.get('composer')))
+                    can_fb = rdate or (plat in ('netease', 'qq') and (cov or need_lyrics)) or (plat in ('deezer', 'ytmusic', 'spotify', 'tadb') and (cov or need_lyrics or hit.get('composer')))
                     if not need_track and can_fb and date_fallback is None:
                         cand = _make_match(plat, aid, None, None, f'{label}(单曲反查)', alb_name, release_date=rdate, artist=sart, title=stitle, **cov_kw, **extra_cand_kw)
+                        cand.affinity_score = aff_score
                         date_fallback = _enrich_song_credits(cand, plat, sid, dummy, need_extra=need_extra, need_lyrics=need_lyrics)
-                elif not need_track and (pub_date or (plat in ('netease', 'qq', 'ytmusic') and need_lyrics) or (plat in ('deezer', 'spotify', 'tadb') and (cov or hit.get('composer')))) and date_fallback is None:
+                elif not need_track and (pub_date or (plat in ('netease', 'qq', 'ytmusic') and (cov or need_lyrics)) or (plat in ('deezer', 'spotify', 'tadb') and (cov or hit.get('composer')))) and date_fallback is None:
                     cand_kws = {'cover_url': cov} if cov else {}
                     if hit.get('genre'):
                         cand_kws['genre'] = hit['genre']
                     if hit.get('composer'):
                         cand_kws['composer'] = hit['composer']
                     cand = TrackMatch(None, source=f'{label}(单曲反查)', album_name=alb_name, release_date=pub_date, artist=sart, title=stitle, **cand_kws)
+                    cand.affinity_score = aff_score
                     date_fallback = _enrich_song_credits(cand, plat, sid, dummy, need_extra=need_extra, need_lyrics=need_lyrics)
             else:
                 if plat == 'kugou' and aid and aid not in seen_albs and len(seen_albs) < 3:
@@ -493,12 +560,14 @@ def _search_song_and_resolve_album(
                     m = match_in_tracks(tracks, title, duration, sid)
                     if m:
                         cand = _make_match('kugou', aid, m, len(tracks), '酷狗音乐(单曲反查)', alb_name, cover_url=cov)
+                        cand.affinity_score = aff_score
                         if dummy.album or alb_name:
                             cache_resolved_album('kugou', dummy.album or alb_name, dummy.artist or sart, aid, alb_name)
                         return _enrich_song_credits(cand, 'kugou', sid, dummy, need_extra=need_extra, need_lyrics=need_lyrics, title=stitle, duration=sdur)
                 rdate = get_album_date('kugou', aid) if (plat == 'kugou' and aid) else ''
                 cand = TrackMatch(None, source=f'{label}(单曲搜索)', album_name=alb_name, release_date=rdate, title=stitle, artist=sart, cover_url=cov)
-                _enrich_song_credits(cand, plat, sid, dummy, need_extra=need_extra, need_lyrics=need_lyrics, title=stitle, duration=sdur, lrc_url=hit['lrc_url'])
+                cand.affinity_score = aff_score
+                _enrich_song_credits(cand, plat, sid, dummy, need_extra=need_extra, need_lyrics=need_lyrics, title=stitle, duration=sdur, lrc_url=hit.get('lrc_url'))
                 if plat == 'lrclib' and need_lyrics and not cand.lyrics:
                     continue
                 if not need_track:
@@ -593,6 +662,7 @@ def _resolve_metadata_core(
     skip_plats: set[str] | None = None, allow_mb: bool = True,
     allow_itunes_song: bool = True, tried_out: set[str] | None = None,
     plat_order: tuple[str, ...] | None = None,
+    prefer_rich_lyrics: bool = False,
 ) -> TrackMatch:
     ident = clues['identifier']
     skip_plats = skip_plats or set()
@@ -752,9 +822,23 @@ def _resolve_metadata_core(
         title, artist, duration, track,
         need_track=need_track, need_date=need_date, need_extra=need_extra, need_lyrics=need_lyrics,
         skip_plats=skip_plats, allow_itunes_song=allow_itunes_song, tried_out=tried_out, plat_order=song_order,
+        prefer_rich_lyrics=prefer_rich_lyrics,
     )
     if _match_has_requested(song_match, need_track=need_track, need_date=need_date, need_cover=need_cover, need_core=need_core, need_extra=need_extra, need_lyrics=need_lyrics):
         return song_match
+
+    # 若未命中且无艺术家，但有从目录推断出的专辑名（单级目录形如 邓丽君/01 - 小城故事.dff，目录名实为歌手名）
+    if not artist and album and album != title:
+        cand_art_match = _search_song_and_resolve_album(
+            title, album, duration, track,
+            need_track=need_track, need_date=need_date, need_extra=need_extra, need_lyrics=need_lyrics,
+            skip_plats=skip_plats, allow_itunes_song=allow_itunes_song, tried_out=tried_out, plat_order=song_order,
+            prefer_rich_lyrics=prefer_rich_lyrics,
+        )
+        if _match_has_requested(cand_art_match, need_track=need_track, need_date=need_date, need_cover=need_cover, need_core=need_core, need_extra=need_extra, need_lyrics=need_lyrics):
+            return cand_art_match
+        if cand_art_match and (song_match is None or not song_match.source or (cand_art_match.cover_url and not song_match.cover_url)):
+            song_match = cand_art_match
     if not need_track and album_fallback is not None:
         return album_fallback
     if not need_track and track_fallback is not None:
@@ -817,6 +901,7 @@ def resolve_track_metadata(
     prefer_sources: tuple[str, ...] | list[str] | None = None,
     only_sources: set[str] | frozenset[str] | tuple[str, ...] | list[str] | None = None,
     skip_sources: set[str] | frozenset[str] | tuple[str, ...] | list[str] | None = None,
+    prefer_rich_lyrics: bool = False,
 ) -> TrackMatch:
     """为单首歌曲联网解析并合并多平台元数据（音轨/碟号/日期/封面/艺术家/作曲/流派/歌词）。"""
     clues = _parse_filename_clues(track)
@@ -836,12 +921,28 @@ def resolve_track_metadata(
     if not primary_order and not extended_order:
         return TrackMatch(None, reason='所有在线数据源均被跳过')
 
+    # 若仅缺少制作人员(词/曲/编)且本地已有内嵌歌词/LRC写明，直接秒级返回，免去跨国网络查询
+    want_credits = bool(
+        (need_extra or (need_fields and any(f in need_fields for f in ('composer', 'lyricist', 'arranger'))))
+        and not (track.composer and track.lyricist and track.arranger)
+    )
+    if want_credits and not any((need_track, need_date, need_cover, need_artist_art, need_core, need_lyrics)):
+        local_creds = _extract_local_track_credits(track)
+        if any(local_creds.values()):
+            return TrackMatch(
+                None, source='本地歌词',
+                composer=local_creds.get('composer', ''),
+                lyricist=local_creds.get('lyricist', ''),
+                arranger=local_creds.get('arranger', ''),
+            )
+
     tried: set[str] = set()
     res = _resolve_metadata_core(
         track, clues, title, artist, album, duration,
         need_track=need_track, need_date=need_date, need_cover=need_cover,
         need_core=need_core, need_extra=need_extra, need_lyrics=need_lyrics,
         allow_mb=('mb' in primary_order), tried_out=tried, plat_order=primary_order,
+        prefer_rich_lyrics=prefer_rich_lyrics,
     )
     primary_matched = bool(res.source)
 
@@ -850,9 +951,18 @@ def resolve_track_metadata(
         pm = _extract_pkl_metadata(pkl)
         _merge_match(res, TrackMatch(
             None, source=res.source or 'musicdl缓存', album_name=pm['album'], release_date=pm['release_date'],
-            title=pm['title'], artist=pm['artist'], composer=pm['composer'], cover_url=pm['cover_url'],
-            lyrics=pm['lyrics'],
+            title=pm['title'], artist=pm['artist'], composer=pm.get('composer', ''),
+            lyricist=pm.get('lyricist', ''), arranger=pm.get('arranger', ''),
+            cover_url=pm['cover_url'], lyrics=pm['lyrics'],
         ))
+
+    if want_credits and not (res.composer and res.lyricist and res.arranger):
+        local_creds = _extract_local_track_credits(track)
+        for rk in ('composer', 'lyricist', 'arranger'):
+            if not getattr(res, rk) and local_creds.get(rk):
+                setattr(res, rk, local_creds[rk])
+                if not res.source:
+                    res.source = '本地歌词'
 
     # 若主平台未命中且仍缺少除纯粹 composer 外的必要字段（或缺少歌词），继续尝试扩展中文源（酷狗/咪咕/千千）
     if not primary_matched and extended_order and (need_track or need_date or need_cover or need_core or need_lyrics):
@@ -861,6 +971,7 @@ def resolve_track_metadata(
             need_track=need_track, need_date=need_date, need_cover=need_cover,
             need_core=need_core, need_extra=need_extra, need_lyrics=need_lyrics,
             allow_mb=False, tried_out=tried, plat_order=extended_order,
+            prefer_rich_lyrics=prefer_rich_lyrics,
         )
         _merge_match(res, ext_res)
         primary_matched = bool(res.source)
@@ -916,6 +1027,7 @@ def resolve_track_metadata(
                 need_core=rem_core, need_extra=rem_extra, need_lyrics=rem_lyrics,
                 skip_plats=skip, allow_mb=(plat == 'mb'), allow_itunes_song=allow_itunes_song,
                 plat_order=(plat,),
+                prefer_rich_lyrics=prefer_rich_lyrics,
             )
             _merge_match(res, extra_res)
             # 若全部所需字段均已补齐，立即退出补充轮询
@@ -944,3 +1056,469 @@ def resolve_release_date(track: LibraryTrack) -> TrackMatch:
 def resolve_track_number(track: LibraryTrack) -> TrackMatch:
     """为单首歌曲联网解析专辑内音轨号（同时尽可能附带发布日期）。"""
     return resolve_track_metadata(track, need_track=True, need_date=True)
+
+
+def search_candidate_album_covers(
+    title: str = '',
+    artist: str = '',
+    *,
+    album: str = '',
+    limit: int = 14,
+    prefer_sources: tuple[str, ...] | list[str] | None = None,
+    on_progress: Callable[[dict], None] | None = None,
+) -> list[dict]:
+    """为曲目在线检索多个候选专辑封面，严格遵循三级梯队策略并根据原版/首版大碟智能加权打分：
+    1. 第一优先：“专辑名 + 艺术家”（直接命中真实大碟，杜绝被演唱会/Live/精选集带偏）
+    2. 第二优先：“歌曲名 + 艺术家”（单曲反查母碟版本，回退补充）
+    3. 第三优先：“歌曲名”（或单一关键词独立单搜，应对歌手名缺失或外语翻译不一致）
+    """
+    def _notify(evt: dict):
+        if on_progress:
+            try:
+                on_progress(evt)
+            except Exception:
+                pass
+
+    t_clean = str(title or '').strip()
+    a_clean = first_artist(artist) or str(artist or '').strip()
+    alb_clean = str(album or '').strip()
+
+    # 若未显式传入 artist，但 title 或 album 中包含空格，尝试推断可能的歌手后缀
+    if not a_clean and ' ' in t_clean:
+        p_t, p_a = t_clean.rsplit(' ', 1)
+        if len(p_a) >= 2 and not p_a.isdigit():
+            t_clean, a_clean = p_t.strip(), p_a.strip()
+
+    # 如果推断出的专辑名与歌手名相同（如把歌手目录误当成专辑名），清空专辑名
+    if alb_clean and a_clean and alb_clean.lower() == a_clean.lower():
+        alb_clean = ''
+
+    # 构建三级梯队搜索词列表
+    query_chain: list[dict] = []
+
+    # 1. 第一优先：“专辑名 + 艺术家”
+    if alb_clean and a_clean:
+        term1 = f'{alb_clean} {a_clean}'.strip()
+        query_chain.append({'term': term1, 'kind': 'album+artist', 'target_alb': alb_clean})
+
+    # 2. 第二优先：“歌曲名 + 艺术家”
+    if t_clean and a_clean:
+        term2 = f'{t_clean} {a_clean}'.strip()
+        if not any(q['term'] == term2 for q in query_chain):
+            query_chain.append({'term': term2, 'kind': 'title+artist', 'target_alb': alb_clean or t_clean})
+
+    # 3. 第三优先：“歌曲名”（或单一核心词独立检索）
+    if t_clean and not any(q['term'] == t_clean for q in query_chain):
+        query_chain.append({'term': t_clean, 'kind': 'title_only', 'target_alb': alb_clean or t_clean})
+
+    # 4. 补充兜底：独立“专辑名”
+    if alb_clean and not any(q['term'] == alb_clean for q in query_chain):
+        query_chain.append({'term': alb_clean, 'kind': 'album_only', 'target_alb': alb_clean})
+
+    if not query_chain:
+        raw_fallback = t_clean or alb_clean or a_clean
+        if not raw_fallback:
+            return []
+        query_chain.append({'term': raw_fallback, 'kind': 'raw', 'target_alb': raw_fallback})
+
+    candidates: list[dict] = []
+    seen_covers: set[str] = set()
+
+    sources = list(prefer_sources) if prefer_sources else ['qq', 'netease', 'itunes']
+    for plat in ('qq', 'netease', 'itunes'):
+        if plat not in sources:
+            sources.append(plat)
+
+    active_sources = []
+    for plat in sources:
+        prov = PROVIDERS.get(plat)
+        if prov and prov.is_available:
+            active_sources.append({'platform': plat, 'label': prov.label})
+
+    _notify({
+        'type': 'start',
+        'sources': active_sources,
+        'title': t_clean,
+        'artist': a_clean,
+        'album': alb_clean,
+        'total_tiers': len(query_chain),
+    })
+
+    for tier_idx, q_item in enumerate(query_chain, 1):
+        term = q_item['term']
+        is_album_level = 'album' in q_item['kind']
+        target_name = q_item['target_alb']
+        kind = q_item['kind']
+
+        tier_name = {
+            'album+artist': '第一优先：专辑名 + 艺术家（精确定位大碟）',
+            'title+artist': '第二优先：歌曲名 + 艺术家（单曲反查母碟）',
+            'title_only': '第三优先：歌曲名独立检索（兜底容错）',
+            'album_only': '补充梯队：专辑名独立检索',
+            'raw': '关键词检索',
+        }.get(kind, kind)
+
+        _notify({
+            'type': 'tier_start',
+            'tier_idx': tier_idx,
+            'total_tiers': len(query_chain),
+            'tier_name': tier_name,
+            'kind': kind,
+            'term': term,
+            'found_count': len(candidates),
+        })
+
+        for plat in sources:
+            prov = PROVIDERS.get(plat)
+            if not prov or not prov.is_available:
+                continue
+
+            prev_cnt = len(candidates)
+            _notify({
+                'type': 'platform_start',
+                'platform': plat,
+                'platform_label': prov.label,
+                'term': term,
+                'kind': kind,
+                'found_count': prev_cnt,
+            })
+
+            # 若当前为专辑级检索，且音源支持直搜专辑，优先直查该大碟
+            if is_album_level and prov.supports_album_search and hasattr(prov, 'search_album'):
+                try:
+                    aid, aname, artist_ok = prov.search_album(term, alb_clean or term, a_clean)
+                    if aid:
+                        meta = get_album_meta(plat, aid)
+                        cov = meta.get('cover_url') or ''
+                        if cov and cov not in seen_covers:
+                            seen_covers.add(cov)
+                            rdate = meta.get('release_date') or ''
+                            sart = a_clean or meta.get('artist') or ''
+
+                            # 计算匹配得分
+                            score = 0
+                            an_norm = norm_core(aname or target_name)
+                            t_norm = norm_core(target_name)
+
+                            clean_an = re.sub(r'^(复黑王|环球复黑王|btb|首版|经典|lp|cd)\s*', '', an_norm).strip()
+                            if a_clean:
+                                clean_an = re.sub(rf'\s*{re.escape(norm_core(a_clean))}$', '', clean_an).strip()
+                            if not clean_an:
+                                clean_an = an_norm
+
+                            if t_norm in an_norm:
+                                score += 50
+                                if an_norm == t_norm or clean_an == t_norm:
+                                    score += 30
+                            if any(k in an_norm for k in ('精选', '选辑', '演唱会', 'live', 'collection', '纪念', '经典金曲')):
+                                score -= 40
+                            if any(k in an_norm for k in ('复黑王', '首版', 'btb', '原声', 'lp', '黑胶')):
+                                score += 25
+                            if rdate:
+                                try:
+                                    yr = int(rdate[:4])
+                                    if yr <= 1995:
+                                        score += max(0, (2000 - yr))
+                                except Exception:
+                                    pass
+
+                            candidates.append({
+                                'source': prov.label,
+                                'platform': plat,
+                                'album_id': aid,
+                                'album_name': aname or target_name,
+                                'artist': sart,
+                                'release_date': rdate,
+                                'cover_url': cov,
+                                'score': score + 10,  # 官方大碟直查额外加 10 分
+                            })
+                except Exception:
+                    pass
+
+            # 统一执行单曲命中反查候选专辑
+            try:
+                hits = prov.search_song_hits(term)
+            except Exception:
+                hits = []
+
+            for h in hits:
+                aid = h.get('album_id')
+                aname = (h.get('album_name') or '').strip()
+                if not aid or not aname:
+                    continue
+
+                try:
+                    prov.get_album_tracks(aid)
+                except Exception:
+                    pass
+                meta = get_album_meta(plat, aid)
+                cov = meta.get('cover_url') or h.get('cover_url') or ''
+                if not cov or cov in seen_covers:
+                    continue
+                seen_covers.add(cov)
+
+                rdate = meta.get('release_date') or h.get('release_date') or ''
+                sart = h.get('artist') or a_clean
+
+                # 计算品质与原版匹配度得分
+                score = 0
+                an_norm = norm_core(aname)
+                t_norm = norm_core(target_name or t_clean or alb_clean)
+
+                # 剥离版本前缀与歌手后缀，提取核心专辑名对比
+                clean_an = re.sub(r'^(复黑王|环球复黑王|btb|首版|经典|lp|cd)\s*', '', an_norm).strip()
+                if a_clean:
+                    clean_an = re.sub(rf'\s*{re.escape(norm_core(a_clean))}$', '', clean_an).strip()
+                if not clean_an:
+                    clean_an = an_norm
+
+                if t_norm in an_norm:
+                    score += 50
+                    if an_norm == t_norm or clean_an == t_norm:
+                        score += 30
+                # 常见精选、现场、合辑降权
+                if any(k in an_norm for k in ('精选', '选辑', '演唱会', 'live', 'collection', '纪念', '经典金曲')):
+                    score -= 40
+                # 复黑、首版、原声带、黑胶等加权
+                if any(k in an_norm for k in ('复黑王', '首版', 'btb', '原声', 'lp', '黑胶')):
+                    score += 25
+                if rdate:
+                    try:
+                        yr = int(rdate[:4])
+                        if yr <= 1995:
+                            score += max(0, (2000 - yr))
+                    except Exception:
+                        pass
+
+                candidates.append({
+                    'source': prov.label,
+                    'platform': plat,
+                    'album_id': aid,
+                    'album_name': aname,
+                    'artist': sart,
+                    'release_date': rdate,
+                    'cover_url': cov,
+                    'score': score,
+                })
+
+            added_cnt = len(candidates) - prev_cnt
+            _notify({
+                'type': 'platform_done',
+                'platform': plat,
+                'platform_label': prov.label,
+                'added': added_cnt,
+                'found_count': len(candidates),
+                'term': term,
+            })
+
+        # 检查是否已捕获足够丰富的优质候选（若第一/第二阶段已经命中高分大碟且数量充足，无需进行下一级模糊单搜）
+        if len(candidates) >= 6 and any(c['score'] >= 80 for c in candidates):
+            _notify({
+                'type': 'early_stop',
+                'found_count': len(candidates),
+                'message': '已命中足够丰富的高品质首版大碟，提前完成检索',
+            })
+            break
+
+    _notify({
+        'type': 'scoring',
+        'found_count': len(candidates),
+        'message': f'正在对 {len(candidates)} 个候选版本进行首版与品质加权排序...',
+    })
+
+    def _cand_sort_key(c):
+        sc = c['score']
+        rd = c.get('release_date') or ''
+        digits = re.sub(r'\D', '', rd)[:8]
+        date_num = int(digits.ljust(8, '0')) if len(digits) >= 4 else 99999999
+        return (sc, -date_num)
+
+    candidates.sort(key=_cand_sort_key, reverse=True)
+
+    _notify({
+        'type': 'done',
+        'found_count': len(candidates),
+        'final_count': len(candidates[:limit]),
+        'candidates': candidates[:limit],
+    })
+
+    return candidates[:limit]
+
+
+def search_candidate_artist_pics(
+    artist_name: str,
+    *,
+    track_hint: Any = None,
+    limit: int = 14,
+    prefer_sources: tuple[str, ...] | list[str] | None = None,
+    on_progress: Callable[[dict], None] | None = None,
+) -> list[dict]:
+    """为艺术家在线跨国并发检索多个候选头像与宽幅舞台写真壁纸：
+    1. 国内主流官方源（QQ音乐、网易云音乐、酷狗）：获取大头高清肖像（800x800~1000x1000）、曲目与专辑数及别名
+    2. 海外专业开放库（Fanart.tv、TheAudioDB）：获取 1920x1080 社区精选无水印宽屏舞台壁纸与艺术背景
+    3. 全流程支持实时事件反馈与首选/品质加权排序
+    """
+    def _notify(evt: dict):
+        if on_progress:
+            try:
+                on_progress(evt)
+            except Exception:
+                pass
+
+    a_clean = first_artist(artist_name) or str(artist_name or '').strip()
+    if not a_clean or norm_core(a_clean) in _VA_ARTISTS:
+        return []
+
+    hint_title = ''
+    if track_hint is not None:
+        if hasattr(track_hint, 'title'):
+            hint_title = str(track_hint.title or '').strip()
+        else:
+            hint_title = str(track_hint or '').strip()
+
+    # 音源梯队
+    sources = list(prefer_sources) if prefer_sources else ['qq', 'netease', 'fanart', 'tadb', 'kugou']
+    for plat in ('qq', 'netease', 'fanart', 'tadb', 'kugou'):
+        if plat not in sources:
+            sources.append(plat)
+
+    active_sources = []
+    for plat in sources:
+        prov = PROVIDERS.get(plat)
+        if prov and prov.is_available:
+            active_sources.append({'platform': plat, 'label': prov.label})
+
+    _notify({
+        'type': 'start',
+        'sources': active_sources,
+        'artist': a_clean,
+        'hint': hint_title,
+        'total_sources': len(active_sources),
+    })
+
+    candidates: list[dict] = []
+    seen_urls: set[str] = set()
+
+    for item in active_sources:
+        plat = item['platform']
+        plabel = item['label']
+        prov = PROVIDERS.get(plat)
+        if not prov:
+            continue
+
+        prev_cnt = len(candidates)
+        _notify({
+            'type': 'platform_start',
+            'platform': plat,
+            'platform_label': plabel,
+            'artist': a_clean,
+            'found_count': prev_cnt,
+        })
+
+        raw_cands: list[dict] = []
+        try:
+            if hasattr(prov, 'search_artist_candidates'):
+                raw_cands = prov.search_artist_candidates(a_clean, track_hint=hint_title)
+            elif hasattr(prov, 'search_artist'):
+                url = prov.search_artist(a_clean)
+                if url:
+                    raw_cands = [{
+                        'source': prov.label,
+                        'platform': plat,
+                        'artist_name': a_clean,
+                        'pic_url': url,
+                        'aspect_type': 'square',
+                        'resolution': '800×800',
+                        'width': 800,
+                        'height': 800,
+                        'clues': '官方歌手头像',
+                        'raw_meta': {},
+                    }]
+        except Exception:
+            raw_cands = []
+
+        for cand in raw_cands:
+            pic_url = str(cand.get('pic_url') or '').strip()
+            if not pic_url or pic_url in seen_urls:
+                continue
+            seen_urls.add(pic_url)
+
+            # 打分模型
+            score = 0
+            c_name = norm_core(cand.get('artist_name') or '')
+            t_name = norm_core(a_clean)
+
+            if c_name == t_name:
+                score += 50
+            elif t_name in c_name or c_name in t_name:
+                score += 25
+
+            # 同名线索加分
+            clues = str(cand.get('clues') or '')
+            if hint_title and norm_core(hint_title) in norm_core(clues):
+                score += 30
+
+            # 画幅与分辨率加权
+            w = int(cand.get('width') or 0)
+            aspect = cand.get('aspect_type') or 'square'
+            if aspect == 'landscape':
+                if w >= 1920:
+                    score += 25
+                elif w >= 1200:
+                    score += 15
+            else:
+                if w >= 1000:
+                    score += 20
+                elif w >= 800:
+                    score += 15
+                elif 0 < w < 500:
+                    score -= 20
+
+            # 平台权威度
+            if plat in ('fanart', 'tadb') and aspect == 'landscape':
+                score += 10
+            if plat in ('qq', 'netease'):
+                score += 10
+
+            cand_entry = dict(cand)
+            cand_entry['score'] = score
+            candidates.append(cand_entry)
+
+        added = len(candidates) - prev_cnt
+        _notify({
+            'type': 'platform_done',
+            'platform': plat,
+            'platform_label': plabel,
+            'added': added,
+            'found_count': len(candidates),
+        })
+
+    _notify({
+        'type': 'scoring',
+        'found_count': len(candidates),
+        'message': f'正在对 {len(candidates)} 个候选写真进行品质与构图加权排序...',
+    })
+
+    # 排序：得分降序，宽度降序
+    def _cand_sort(c):
+        return (c.get('score', 0), int(c.get('width', 0)))
+
+    candidates.sort(key=_cand_sort, reverse=True)
+
+    # 赋予推荐徽章
+    for idx, c in enumerate(candidates):
+        if idx == 0 and c.get('score', 0) >= 60:
+            c['badge'] = '★首选'
+        elif c.get('score', 0) >= 50:
+            c['badge'] = '推荐'
+        else:
+            c['badge'] = ''
+
+    _notify({
+        'type': 'done',
+        'found_count': len(candidates),
+        'final_count': len(candidates[:limit]),
+        'candidates': candidates[:limit],
+    })
+
+    return candidates[:limit]

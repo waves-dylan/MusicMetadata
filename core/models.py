@@ -2,9 +2,18 @@
 
 from __future__ import annotations
 
+import os
+import re
 from dataclasses import dataclass, field
 
-from core.constants import STATUS_MISSING_DISK, STATUS_OK, STATUS_STALE_FOOBAR
+from core.constants import (
+    PLAYER_TYPE_FOOBAR,
+    PLAYER_TYPE_GENERIC,
+    PLAYER_TYPE_MUSICBEE,
+    STATUS_MISSING_DISK,
+    STATUS_OK,
+    STATUS_STALE_PLAYER,
+)
 
 
 @dataclass
@@ -80,6 +89,8 @@ class LibraryTrack:
     album: str = ''
     date: str = ''
     composer: str = ''
+    lyricist: str = ''
+    arranger: str = ''
     performer: str = ''
     genre: str = ''
     duration: float = 0.0
@@ -105,13 +116,15 @@ class LibraryTrack:
     foobar_album: str = ''
     foobar_date: str = ''
     foobar_composer: str = ''
+    foobar_lyricist: str = ''
+    foobar_arranger: str = ''
     foobar_performer: str = ''
     foobar_genre: str = ''
     foobar_discnumber: str = ''
     foobar_comment: str = ''
-    foobar_size: int | None = None
-    foobar_mtime: float = 0.0
-    foobar_stale_reasons: list[str] = field(default_factory=list)
+    cached_size: int | None = None
+    cached_mtime: float = 0.0
+    player_stale_reasons: list[str] = field(default_factory=list)
     disk_size: int = 0
     disk_mtime: float = 0.0
     status: str = STATUS_OK
@@ -119,7 +132,7 @@ class LibraryTrack:
     is_temp_duplicate: bool = False
     note: str = ''
     needs_tracknumber: bool = False
-    needs_foobar_sync: bool = False
+    needs_player_sync: bool = False
     needs_cover_fix: bool = False
     needs_cover_online: bool = False
     cover_status: str = '正常'
@@ -153,19 +166,49 @@ class LibraryTrack:
     def __post_init__(self):
         if self.status == STATUS_MISSING_DISK and not self.needs_tracknumber:
             self.needs_tracknumber = True
-        elif self.status == STATUS_STALE_FOOBAR and not self.needs_foobar_sync:
-            self.needs_foobar_sync = True
+        elif self.status == STATUS_STALE_PLAYER and not self.needs_player_sync:
+            self.needs_player_sync = True
 
 
 @dataclass
-class FoobarEnv:
-    """foobar2000 本地宿主环境信息。"""
-    fb_exe: str = ''
-    fb_dir: str = ''
-    profile_dir: str = ''
+class PlayerEnv:
+    """播放器宿主环境通用数据实体（适配 foobar2000、MusicBee 与通用媒体库）。"""
+    player_type: str = PLAYER_TYPE_GENERIC
+    player_name: str = '通用本地媒体库'
+    exe_path: str = ''
+    app_dir: str = ''
+    config_dir: str = ''
     library_folders: list[str] = field(default_factory=list)
     unavailable_folders: list[str] = field(default_factory=list)
-    reload_command: str = '标签/从文件重新载入信息'
+    reload_command: str = ''
+    artist_pictures_dir: str = ''
+    extra_info: dict = field(default_factory=dict)
+
+
+@dataclass
+class FoobarEnv(PlayerEnv):
+    """foobar2000 本地宿主环境信息（兼容 PlayerEnv）。"""
+    def __init__(
+        self,
+        exe_path: str = '',
+        app_dir: str = '',
+        config_dir: str = '',
+        library_folders: list[str] | None = None,
+        unavailable_folders: list[str] | None = None,
+        reload_command: str = '标签/从文件重新载入信息',
+        **kwargs,
+    ):
+        super().__init__(
+            player_type=PLAYER_TYPE_FOOBAR,
+            player_name='foobar2000',
+            exe_path=exe_path,
+            app_dir=app_dir,
+            config_dir=config_dir,
+            library_folders=library_folders or [],
+            unavailable_folders=unavailable_folders or [],
+            reload_command=reload_command,
+            extra_info=kwargs,
+        )
 
 
 @dataclass
@@ -182,7 +225,39 @@ class TrackMatch:
     artist: str = ''
     albumartist: str = ''
     composer: str = ''
+    lyricist: str = ''
+    arranger: str = ''
     genre: str = ''
     cover_url: str = ''
     artist_pic_url: str = ''
     lyrics: str = ''
+    affinity_score: float = 0.0
+
+
+def natural_sort_key(s: str) -> tuple:
+    """提取支持数字自然排序且大小写不敏感的类型安全元组。"""
+    if not s:
+        return ()
+    return tuple((0, int(t)) if t.isdigit() else (1, t.lower()) for t in re.split(r'(\d+)', str(s)))
+
+
+def default_track_sort_key(tr: LibraryTrack) -> tuple:
+    """默认排序规则：[专辑艺术家 - 艺术家 - 时间 - 专辑 - 音轨号 - 歌曲名]。"""
+    album_artist = tr.albumartist or tr.artist or ''
+    artist = tr.artist or ''
+    date = tr.date or ''
+    album = tr.album or ''
+    d_num = tr.disk_disc_int if (tr.disk_disc_int is not None and tr.disk_disc_int > 0) else 1
+    t_num = tr.disk_track_int if (tr.disk_track_int is not None and tr.disk_track_int > 0) else 999999
+    title = tr.title or os.path.splitext(tr.filename)[0]
+    return (
+        natural_sort_key(album_artist),
+        natural_sort_key(artist),
+        natural_sort_key(date),
+        natural_sort_key(album),
+        d_num,
+        t_num,
+        natural_sort_key(tr.disk_tracknumber or ''),
+        natural_sort_key(title),
+        tr.path,
+    )

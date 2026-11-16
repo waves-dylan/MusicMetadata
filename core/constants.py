@@ -11,12 +11,14 @@ AUDIO_EXTS: set[str] = {
     '.flac', '.mp3', '.mp2', '.m4a', '.mp4', '.m4b', '.alac',
     '.ogg', '.oga', '.opus', '.wav', '.wave', '.aiff', '.aif', '.aifc',
     '.wma', '.asf', '.ape', '.wv',
+    '.dsf', '.tak', '.mpc', '.tta', '.dff',
 }
 SUPPORTS_EMBEDDED_LYRICS: set[str] = {
     'flac', 'mp3', 'mp4', 'ogg', 'opus', 'asf', 'aiff', 'wav', 'ape', 'wv',
+    'dsf', 'tta', 'tak', 'mpc',
 }
-PREFER_EXTERNAL_LRC_CONTAINERS: set[str] = {'wav', 'ape', 'wv'}
-CONVERT_TARGET_FORMATS: tuple[str, ...] = ('flac', 'mp3', 'm4a', 'ogg', 'opus', 'wav', 'aiff')
+PREFER_EXTERNAL_LRC_CONTAINERS: set[str] = {'wav', 'ape', 'wv', 'tak', 'mpc', 'dff'}
+CONVERT_TARGET_FORMATS: tuple[str, ...] = ('flac', 'mp3', 'm4a', 'ogg', 'opus', 'wav', 'aiff', 'dsf')
 
 # 图片规范与尺寸限制
 IMG_EXT: set[str] = {'.jpg', '.jpeg', '.png', '.webp', '.bmp'}
@@ -32,19 +34,27 @@ HUGE_BYTES = 2 * 1024 * 1024
 HUGE_PIXELS = 4_000_000
 SAME_ART_DISTANCE = 12
 
-SUPPORTS_COVER_WRITE: set[str] = {'flac', 'mp4', 'mp3', 'wav', 'aiff', 'ogg', 'opus'}
-SUPPORTS_ARTIST_WRITE: set[str] = {'flac', 'mp3', 'wav', 'aiff', 'ogg', 'opus'}
+SUPPORTS_COVER_WRITE: set[str] = {'flac', 'mp4', 'mp3', 'wav', 'aiff', 'ogg', 'opus', 'dsf', 'tta'}
+SUPPORTS_ARTIST_WRITE: set[str] = {'flac', 'mp3', 'wav', 'aiff', 'ogg', 'opus', 'dsf', 'tta'}
 LYRICS_MODES: tuple[str, ...] = ('auto', 'embed', 'lrc', 'both')
+
+# 播放器类型与标识
+PLAYER_TYPE_FOOBAR = 'foobar'
+PLAYER_TYPE_MUSICBEE = 'musicbee'
+PLAYER_TYPE_ROON = 'roon'
+PLAYER_TYPE_GENERIC = 'generic'
 
 # 轨道扫描状态
 STATUS_MISSING_DISK = 'missing_disk'
-STATUS_STALE_FOOBAR = 'stale_foobar'
+STATUS_STALE_PLAYER = 'stale_player'
 STATUS_OK = 'ok'
 STATUS_ERROR = 'error'
 
 # 标签字段分组与展示名称
 CORE_TEXT_FIELDS: tuple[str, ...] = ('title', 'artist', 'albumartist', 'album', 'date')
-EXTRA_TEXT_FIELDS: tuple[str, ...] = ('composer', 'genre', 'discnumber')
+EXTRA_TEXT_FIELDS: tuple[str, ...] = ('composer', 'lyricist', 'arranger', 'genre', 'discnumber')
+CREDIT_TEXT_FIELDS: tuple[str, ...] = ('composer', 'lyricist', 'arranger')
+CONDITIONAL_EXTRA_FIELDS: tuple[str, ...] = ('lyricist', 'arranger')
 FIELD_LABELS: dict[str, str] = {
     'title': '标题',
     'artist': '艺术家',
@@ -52,6 +62,8 @@ FIELD_LABELS: dict[str, str] = {
     'album': '专辑',
     'date': '日期',
     'composer': '作曲',
+    'lyricist': '作词',
+    'arranger': '编曲',
     'performer': '表演者',
     'genre': '流派',
     'tracknumber': '音轨号',
@@ -60,15 +72,27 @@ FIELD_LABELS: dict[str, str] = {
     'lyrics': '歌词',
     'cover': '封面',
     'artist_cover': '封面-艺术家',
+    'roonalbumtag': 'Roon专辑标签',
+    'roontracktag': 'Roon音轨标签',
+    'originaldate': '原始发行日期',
+    'barcode': '唱片条码',
+    'catalognumber': '厂牌唱片号',
+    'musicbrainz_albumid': 'MusicBrainz专辑ID',
+    'musicbrainz_trackid': 'MusicBrainz音轨ID',
+    'musicbrainz_artistid': 'MusicBrainz艺术家ID',
 }
 
 DELETABLE_FIELDS: tuple[str, ...] = (
     'cover', 'artist_cover', 'title', 'artist', 'albumartist', 'album', 'date',
-    'composer', 'performer', 'genre', 'tracknumber', 'discnumber', 'comment', 'lyrics',
+    'composer', 'lyricist', 'arranger', 'performer', 'genre', 'tracknumber', 'discnumber', 'comment', 'lyrics',
+    'roonalbumtag', 'roontracktag', 'originaldate', 'barcode', 'catalognumber',
+    'musicbrainz_albumid', 'musicbrainz_trackid', 'musicbrainz_artistid',
 )
 SETTABLE_FIELDS: tuple[str, ...] = (
     'title', 'artist', 'albumartist', 'album', 'date',
-    'composer', 'performer', 'genre', 'tracknumber', 'discnumber', 'comment', 'lyrics',
+    'composer', 'lyricist', 'arranger', 'performer', 'genre', 'tracknumber', 'discnumber', 'comment', 'lyrics',
+    'roonalbumtag', 'roontracktag', 'originaldate', 'barcode', 'catalognumber',
+    'musicbrainz_albumid', 'musicbrainz_trackid', 'musicbrainz_artistid',
 )
 
 FOLDER_COVER_LABELS: dict[str, str] = {

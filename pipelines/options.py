@@ -21,6 +21,8 @@ class FixOptions:
     enable_albumartist: bool = True
     enable_artist: bool = True
     enable_composer: bool = True
+    enable_lyricist: bool = True
+    enable_arranger: bool = True
     enable_genre: bool = True
     enable_disc: bool = True
     enable_lyrics: bool = False
@@ -34,9 +36,13 @@ class FixOptions:
     tadb_api_key: str | None = None
     fanart_api_key: str | None = None
     fanart_client_key: str | None = None
+    discogs_token: str | None = None
+    sync_musicbee_artist: bool = True
+    musicbee_artist_dir: str | None = None
     enable_sync: bool = True
     sync_only: bool = False
     dry_run: bool = False
+    enable_reverse_cover_cascade: bool = False  # 场景 B：单曲高分锁定真身大碟反向注入生成 cover.jpg（默认关闭，开启需警告）
 
     def active_tag_fields(self) -> frozenset[str]:
         if not self.enable_tags:
@@ -53,6 +59,10 @@ class FixOptions:
         if self.enable_extra_tags:
             if self.enable_composer:
                 fields.add('composer')
+            if self.enable_lyricist:
+                fields.add('lyricist')
+            if self.enable_arranger:
+                fields.add('arranger')
             if self.enable_genre:
                 fields.add('genre')
             if self.enable_disc:
@@ -74,6 +84,7 @@ def default_checked(track: LibraryTrack, skip_full_album: bool = True, options: 
         enabled_tag_fields=opts.active_tag_fields(),
         enable_lyrics=opts.enable_lyrics,
         enable_artist_art=opts.enable_artist_art,
+        lyrics_mode=getattr(opts, 'lyrics_mode', 'auto'),
     )
 
 
@@ -106,6 +117,34 @@ class ConvertOptions:
     delete_source: bool = False
     enable_sync: bool = True
     dry_run: bool = False
+
+
+@dataclass
+class SacdExtractOptions:
+    """SACD ISO 分轨与后处理选项。"""
+    channel_area: str = '2ch'          # '2ch' (立体声) 或 'mch' (多声道)
+    output_format: str = 'dsf'         # 'dsf' 或 'dsdiff'
+    output_dir: str | None = None      # 目标输出目录 (默认为 [ISO目录]/[专辑名] (DSF))
+    selected_tracks: tuple[int, ...] = ()  # 选定曲目序号 (1-based)，空则全盘
+    apply_toc_tags: bool = True        # 写入光盘 TOC 原生标签
+    auto_repair: bool = False          # 联网检索并校准高清标签 (QQ音乐/网易云等)
+    fetch_cover: bool = False          # 注入 1000px 专辑封面与歌手写真
+    fetch_lyrics: bool = False         # 下载双语同步 LRC 歌词
+    lyrics_mode: str = 'both'          # 歌词补全模式 ('auto', 'both', 'embed', 'lrc')
+    export_folder_art: bool = True     # 导出本地 cover.jpg 与 artist.jpg
+    import_to_library: bool = True     # 提取完成后导入主界面曲目库
+    dry_run: bool = False
+
+
+@dataclass
+class ZhConvertOptions:
+    """华语简繁文本批量转换配置选项。"""
+    direction: str = 't2s'                     # 't2s' (繁->简) 或 's2t' (简->繁)
+    fields: tuple[str, ...] = ('title', 'artist', 'albumartist', 'album')
+    convert_lyrics: bool = False                # 是否同步转换内嵌与外置 .lrc 歌词
+    preserve_jpop: bool = True                  # 保护日文汉字（包含假名或命中知名日文艺术家时跳过）
+    enable_sync: bool = True                    # 转换后刷新播放器缓存
+    dry_run: bool = False                       # 仅预演（不修改文件）
 
 
 _DELETE_FIELD_ALIASES = {

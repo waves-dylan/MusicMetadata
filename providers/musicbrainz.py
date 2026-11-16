@@ -5,6 +5,7 @@ from __future__ import annotations
 import threading
 import time
 
+from core.zh_norm import to_simplified, to_traditional
 from providers.base import (
     MusicProvider,
     build_tracks,
@@ -20,30 +21,43 @@ from providers.base import (
 
 MB_UA = 'MusicMetadata/1.0 (https://github.com/waves-dylan/MusicMetadata)'
 MB_FAIL_THRESHOLD = 5
+MB_COOLDOWN_SECONDS = 60.0
 
 _MB_LOCK = threading.Lock()
 _MB_LAST = 0.0
 _MB_CONSEC_FAILS = 0
 _MB_CIRCUIT_OPEN = False
+_MB_OPENED_AT = 0.0
 
 
 def reset_mb_circuit() -> None:
-    global _MB_CONSEC_FAILS, _MB_CIRCUIT_OPEN
+    global _MB_CONSEC_FAILS, _MB_CIRCUIT_OPEN, _MB_OPENED_AT
     with _MB_LOCK:
         _MB_CONSEC_FAILS = 0
         _MB_CIRCUIT_OPEN = False
+        _MB_OPENED_AT = 0.0
 
 
 def is_mb_circuit_open() -> bool:
+    global _MB_CIRCUIT_OPEN, _MB_CONSEC_FAILS, _MB_OPENED_AT
     with _MB_LOCK:
+        if _MB_CIRCUIT_OPEN and _MB_OPENED_AT and (time.time() - _MB_OPENED_AT) >= MB_COOLDOWN_SECONDS:
+            _MB_CIRCUIT_OPEN = False
+            _MB_CONSEC_FAILS = 0
+            _MB_OPENED_AT = 0.0
         return _MB_CIRCUIT_OPEN
 
 
 def mb_get(url: str, params=None):
-    global _MB_LAST, _MB_CONSEC_FAILS, _MB_CIRCUIT_OPEN
+    global _MB_LAST, _MB_CONSEC_FAILS, _MB_CIRCUIT_OPEN, _MB_OPENED_AT
     with _MB_LOCK:
         if _MB_CIRCUIT_OPEN:
-            return None
+            if _MB_OPENED_AT and (time.time() - _MB_OPENED_AT) >= MB_COOLDOWN_SECONDS:
+                _MB_CIRCUIT_OPEN = False
+                _MB_CONSEC_FAILS = 0
+                _MB_OPENED_AT = 0.0
+            else:
+                return None
         wait = 1.05 - (time.time() - _MB_LAST)
         if wait > 0:
             time.sleep(wait)
@@ -54,6 +68,7 @@ def mb_get(url: str, params=None):
             _MB_CONSEC_FAILS += 1
             if _MB_CONSEC_FAILS >= MB_FAIL_THRESHOLD:
                 _MB_CIRCUIT_OPEN = True
+                _MB_OPENED_AT = time.time()
         else:
             _MB_CONSEC_FAILS = 0
     return res
@@ -105,8 +120,13 @@ class MusicBrainzProvider(MusicProvider):
 
     def search_album(self, term: str, album_name: str, singer: str) -> tuple[str, str, bool]:
         def _do():
-            q = f'release:"{album_name}"' + (f' AND artist:"{singer}"' if singer else '')
+            clean_alb = str(album_name or '').replace('"', '\\"')
+            clean_art = str(singer or '').replace('"', '\\"')
+            q = f'release:"{clean_alb}"' + (f' AND artist:"{clean_art}"' if singer else '')
             d = mb_get('https://musicbrainz.org/ws/2/release/', params={'query': q, 'limit': 8, 'fmt': 'json'})
+            if not ((d or {}).get('releases')) and to_traditional(clean_alb) != clean_alb:
+                trad_q = f'release:"{to_traditional(clean_alb)}"' + (f' AND artist:"{to_traditional(clean_art)}"' if singer else '')
+                d = mb_get('https://musicbrainz.org/ws/2/release/', params={'query': trad_q, 'limit': 8, 'fmt': 'json'})
             b, artist_ok = choose_album_detail(
                 (d or {}).get('releases') or [],
                 album_name, singer, lambda x: x.get('title'),

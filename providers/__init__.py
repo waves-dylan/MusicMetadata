@@ -7,6 +7,12 @@ from collections.abc import Iterable
 from providers.baidu import BaiduProvider
 from providers.base import MusicProvider, ProviderCircuitBreaker, TrackMatch
 from providers.deezer import DeezerProvider
+from providers.discogs import (
+    DiscogsProvider,
+    get_discogs_token,
+    has_discogs_token,
+    set_discogs_token,
+)
 from providers.fanart import FanartTvProvider, get_fanart_keys, set_fanart_keys
 from providers.itunes import ITunesProvider
 from providers.kugou import KugouProvider
@@ -27,7 +33,7 @@ from providers.ytmusic import YouTubeMusicProvider
 
 PRIMARY_PROVIDERS: tuple[str, ...] = ('netease', 'qq', 'itunes', 'mb')
 EXTENDED_CN_PROVIDERS: tuple[str, ...] = ('kugou', 'migu', 'baidu')
-EXTENDED_INTL_PROVIDERS: tuple[str, ...] = ('deezer', 'ytmusic', 'lrclib', 'spotify', 'tadb', 'fanart')
+EXTENDED_INTL_PROVIDERS: tuple[str, ...] = ('deezer', 'ytmusic', 'lrclib', 'spotify', 'tadb', 'fanart', 'discogs')
 ONLINE_PROVIDERS: tuple[str, ...] = PRIMARY_PROVIDERS + EXTENDED_CN_PROVIDERS + EXTENDED_INTL_PROVIDERS
 
 netease_provider = NetEaseProvider()
@@ -44,6 +50,7 @@ kuwo_provider = KuwoProvider()
 spotify_provider = SpotifyProvider()
 tadb_provider = TheAudioDBProvider()
 fanart_provider = FanartTvProvider()
+discogs_provider = DiscogsProvider()
 
 PROVIDERS: dict[str, MusicProvider] = {
     'netease': netease_provider,
@@ -60,6 +67,7 @@ PROVIDERS: dict[str, MusicProvider] = {
     'spotify': spotify_provider,
     'tadb': tadb_provider,
     'fanart': fanart_provider,
+    'discogs': discogs_provider,
 }
 
 PROVIDER_LABELS: dict[str, str] = {pid: p.label for pid, p in PROVIDERS.items()}
@@ -79,6 +87,7 @@ _SOURCE_ALIASES: dict[str, str] = {
     'spotify': 'spotify', 'sp': 'spotify',
     'tadb': 'tadb', 'theaudiodb': 'tadb', 'audiodb': 'tadb',
     'fanart': 'fanart', 'fanarttv': 'fanart', 'fanart.tv': 'fanart',
+    'discogs': 'discogs', 'dg': 'discogs', 'dc': 'discogs',
 }
 
 
@@ -144,10 +153,11 @@ def resolve_provider_order(
 __all__ = [
     'EXTENDED_CN_PROVIDERS', 'EXTENDED_INTL_PROVIDERS', 'ONLINE_PROVIDERS', 'PRIMARY_PROVIDERS',
     'PROVIDERS', 'PROVIDER_LABELS', 'MusicProvider', 'ProviderCircuitBreaker', 'TrackMatch',
-    'baidu_provider', 'deezer_provider', 'fanart_provider', 'get_fanart_keys', 'get_netease_api_base',
-    'get_spotify_credentials', 'get_tadb_api_key', 'has_spotify_credentials', 'itunes_provider',
-    'kugou_provider', 'kuwo_provider', 'lrclib_provider', 'mb_provider', 'migu_provider',
-    'netease_provider', 'normalize_provider_name', 'parse_source_list', 'qq_provider',
-    'resolve_provider_order', 'set_fanart_keys', 'set_netease_api_base', 'set_spotify_credentials',
-    'set_tadb_api_key', 'spotify_provider', 'tadb_provider', 'ytmusic_provider',
+    'baidu_provider', 'deezer_provider', 'discogs_provider', 'fanart_provider', 'get_discogs_token',
+    'get_fanart_keys', 'get_netease_api_base', 'get_spotify_credentials', 'get_tadb_api_key',
+    'has_discogs_token', 'has_spotify_credentials', 'itunes_provider', 'kugou_provider', 'kuwo_provider',
+    'lrclib_provider', 'mb_provider', 'migu_provider', 'netease_provider', 'normalize_provider_name',
+    'parse_source_list', 'qq_provider', 'resolve_provider_order', 'set_discogs_token', 'set_fanart_keys',
+    'set_netease_api_base', 'set_spotify_credentials', 'set_tadb_api_key', 'spotify_provider',
+    'tadb_provider', 'ytmusic_provider',
 ]

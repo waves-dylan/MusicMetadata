@@ -128,12 +128,75 @@ class NetEaseProvider(MusicProvider):
                 d = http_get_json(f'{self.api_base}/search', params={'keywords': term, 'type': 1, 'limit': 15})
             else:
                 d = http_get_json(
-                    'https://music.163.com/api/search/get',
-                    params={'s': term, 'type': 1, 'limit': 10, 'offset': 0},
+                    'https://music.163.com/api/cloudsearch/pc',
+                    params={'s': term, 'type': 1, 'limit': 15, 'offset': 0},
                     headers=self._headers(),
                 )
+                if not d or not ((d.get('result') or {}).get('songs')):
+                    # 备选回退至旧版接口
+                    d = http_get_json(
+                        'https://music.163.com/api/search/get',
+                        params={'s': term, 'type': 1, 'limit': 10, 'offset': 0},
+                        headers=self._headers(),
+                    )
             return ((d or {}).get('result') or {}).get('songs') or []
         return cached_song_search('netease_song', self.api_base or 'default', term, _fetch)
+
+    def search_artist_candidates(self, artist_name: str, *, track_hint: str = '') -> list[dict]:
+        name = str(artist_name or '').strip()
+        if not name:
+            return []
+
+        try:
+            if self.api_base:
+                d = http_get_json(f'{self.api_base}/search', params={'keywords': name, 'type': 100, 'limit': 10})
+            else:
+                d = http_get_json(
+                    'https://music.163.com/api/search/get',
+                    params={'s': name, 'type': 100, 'limit': 10, 'offset': 0},
+                    headers=self._headers(),
+                )
+        except Exception:
+            return []
+
+        artists = ((d or {}).get('result') or {}).get('artists') or []
+        if not isinstance(artists, list):
+            return []
+
+        results: list[dict] = []
+        seen_pics: set[str] = set()
+        for a in artists:
+            if not isinstance(a, dict):
+                continue
+            pic = str(a.get('picUrl') or a.get('img1v1Url') or '').strip()
+            if not pic or not pic.startswith('http') or 'default_avatar' in pic:
+                continue
+            pic = pic.replace('http://', 'https://')
+            if pic in seen_pics:
+                continue
+            seen_pics.add(pic)
+            aname = str(a.get('name') or '').strip() or name
+            album_size = a.get('albumSize') or 0
+            alias = [str(x).strip() for x in (a.get('alias') or []) if str(x).strip()]
+            clues = f'专辑 {album_size} 张'
+            if alias:
+                clues += f' · 别名: {", ".join(alias[:2])}'
+            trans = str(a.get('trans') or '').strip()
+            if trans and trans not in alias:
+                clues += f' ({trans})'
+            results.append({
+                'source': self.label,
+                'platform': self.id,
+                'artist_name': aname,
+                'pic_url': pic,
+                'aspect_type': 'square',
+                'resolution': '1000×1000',
+                'width': 1000,
+                'height': 1000,
+                'clues': clues,
+                'raw_meta': a,
+            })
+        return results
 
     def search_artist(self, artist_name: str) -> str:
         name = str(artist_name or '').strip()
@@ -141,31 +204,14 @@ class NetEaseProvider(MusicProvider):
             return ''
 
         def _fetch() -> str:
-            if self.api_base:
-                d = http_get_json(f'{self.api_base}/search', params={'keywords': name, 'type': 100, 'limit': 5})
-            else:
-                d = http_get_json(
-                    'https://music.163.com/api/search/get',
-                    params={'s': name, 'type': 100, 'limit': 5, 'offset': 0},
-                    headers=self._headers(),
-                )
-            artists = ((d or {}).get('result') or {}).get('artists') or []
-            if not isinstance(artists, list) or not artists:
+            cands = self.search_artist_candidates(name)
+            if not cands:
                 return ''
             sk = norm_core(name)
-            for a in artists:
-                if not isinstance(a, dict):
-                    continue
-                if sk and norm_core(a.get('name') or '') == sk:
-                    pic = str(a.get('picUrl') or a.get('img1v1Url') or '').strip()
-                    if pic:
-                        return pic.replace('http://', 'https://')
-            first = artists[0]
-            if isinstance(first, dict):
-                pic = str(first.get('picUrl') or first.get('img1v1Url') or '').strip()
-                if pic:
-                    return pic.replace('http://', 'https://')
-            return ''
+            for c in cands:
+                if sk and norm_core(c['artist_name']) == sk:
+                    return c['pic_url']
+            return cands[0]['pic_url']
 
         return cached_artist_url('netease', name, _fetch)
 
@@ -174,16 +220,20 @@ class NetEaseProvider(MusicProvider):
         for s in self.search_songs(term):
             if not isinstance(s, dict):
                 continue
-            alb = s.get('album') or {}
+            alb = s.get('al') or s.get('album') or {}
+            pic_url = str(alb.get('picUrl') or '')
+            if pic_url.startswith('http://'):
+                pic_url = 'https://' + pic_url[7:]
+            pub_time = s.get('publishTime') or alb.get('publishTime')
             hits.append({
                 'title': str(s.get('name') or ''),
-                'artist': extract_artist_names(s.get('artists'), sep=' '),
-                'duration': to_seconds(s.get('duration')),
+                'artist': extract_artist_names(s.get('ar') or s.get('artists'), sep=' '),
+                'duration': to_seconds(s.get('dt') or s.get('duration')),
                 'song_id': str(s.get('id') or ''),
                 'album_id': str(alb['id']) if alb.get('id') else '',
                 'album_name': str(alb.get('name') or ''),
-                'release_date': normalize_release_date(alb.get('publishTime'), is_ms=True),
-                'cover_url': str(alb.get('picUrl') or ''),
+                'release_date': normalize_release_date(pub_time, is_ms=True),
+                'cover_url': pic_url,
                 'genre': '',
                 'lrc_url': '',
             })

@@ -10,9 +10,9 @@ from tkinter import messagebox
 
 from cli import build_arg_parser, run_cli
 from core.config import get_default_music_folders
-from core.models import FoobarEnv, LibraryTrack, TrackMatch
+from core.models import FoobarEnv, LibraryTrack, PlayerEnv, TrackMatch
+from infra.integrations import detect_active_player, detect_foobar_env
 from infra.integrations.foobar import (
-    detect_foobar_env,
     get_running_foobar_exes,
     scan_library,
     sync_files_to_foobar,
@@ -23,11 +23,13 @@ from pipelines import (
     DeleteOptions,
     FixOptions,
     SetOptions,
+    ZhConvertOptions,
     default_checked,
     execute_convert,
     execute_deletions,
     execute_repairs,
     execute_set_tags,
+    execute_zh_convert,
     parse_delete_fields,
 )
 from services.art import (
@@ -45,6 +47,7 @@ from ui.dialogs import (
     FolderManagerDialog,
     SetMetadataDialog,
     SourceConfigDialog,
+    ZhConvertDialog,
 )
 from ui.main_window import (
     MainWindow,
@@ -66,20 +69,25 @@ __all__ = [
     'FolderManagerDialog',
     'LibraryTrack',
     'MainWindow',
+    'PlayerEnv',
     'SetMetadataDialog',
     'SetOptions',
     'SourceConfigDialog',
     'TrackMatch',
+    'ZhConvertDialog',
+    'ZhConvertOptions',
     '_apply_window_icon',
     '_format_cover_cell',
     '_format_status_badge',
     '_format_tag_sync_cell',
     '_resource_path',
+    'detect_active_player',
     'detect_foobar_env',
     'execute_convert',
     'execute_deletions',
     'execute_repairs',
     'execute_set_tags',
+    'execute_zh_convert',
     'fetch_cover_bytes',
     'find_ffmpeg',
     'get_default_music_folders',
@@ -94,7 +102,17 @@ __all__ = [
 
 def main():
     args = build_arg_parser().parse_args()
-    if args.auto or args.dry_run or args.sync_only or args.delete or args.set_tags or args.convert:
+    if (
+        args.auto
+        or args.dry_run
+        or args.sync_only
+        or args.delete
+        or args.set_tags
+        or args.convert
+        or args.zh_convert
+        or args.sacd_info
+        or args.sacd_extract
+    ):
         sys.exit(run_cli(args))
 
     if os.name == 'nt':

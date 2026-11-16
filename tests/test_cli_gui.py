@@ -10,6 +10,7 @@ import threading
 import time
 import types
 from unittest.mock import patch
+from tkinter import ttk
 
 from mutagen.flac import FLAC, Picture
 from mutagen.mp3 import MP3
@@ -19,7 +20,7 @@ import app as app_mod
 from core.constants import (
     STATUS_MISSING_DISK,
     STATUS_OK,
-    STATUS_STALE_FOOBAR,
+    STATUS_STALE_PLAYER,
 )
 from core.models import FoobarEnv, LibraryTrack, TrackMatch
 from infra.integrations.foobar import scan_library
@@ -57,7 +58,7 @@ class CliGuiTests(TempTrackTestCase):
                 album='Album',
                 disk_tracknumber='5',
                 disk_track_int=5,
-                status=STATUS_STALE_FOOBAR,
+                status=STATUS_STALE_PLAYER,
             )
 
             with patch('app.detect_foobar_env', return_value=fake_env) as m_env, \
@@ -73,8 +74,13 @@ class CliGuiTests(TempTrackTestCase):
                 self.assertEqual(str(win.btn_rescan.cget('text')), '扫描媒体库')
                 prefer_values = list(win.cmb_prefer_source.cget('values'))
                 self.assertNotIn('Apple/MB优先', prefer_values)
+                self.assertIn('默认(免梯直连)', prefer_values)
+                self.assertIn('华语/国内优先', prefer_values)
+                self.assertIn('欧美/国际优先', prefer_values)
                 self.assertIn('Apple/iTunes优先', prefer_values)
                 self.assertIn('MusicBrainz优先', prefer_values)
+                self.assertEqual(win._PREFER_PRESETS['默认(免梯直连)'], ())
+                self.assertEqual(win._PREFER_PRESETS['华语/国内优先'], ('netease', 'qq', 'kugou', 'migu', 'baidu'))
                 self.assertEqual(win._PREFER_PRESETS['Apple/iTunes优先'], ('itunes',))
                 self.assertEqual(win._PREFER_PRESETS['MusicBrainz优先'], ('mb',))
 
@@ -122,12 +128,20 @@ class CliGuiTests(TempTrackTestCase):
             self.assertTrue(hasattr(win, 'btn_sync_only'))
             self.assertEqual(len(win.tree['columns']), 9)
 
-            # 验证 busy 模式下所有控件与选项（含艺术家图、跳过整轨、只看待处理等）均被正确置灰禁用
+            # 验证 busy 模式下所有控件与选项（含挑选封面、SACD提取、搜索栏、艺术家图、跳过整轨、只看待处理等）均被正确置灰禁用
             win._set_busy(True, '正在处理测试...')
             self.assertEqual(str(win.chk_artist_art.cget('state')), 'disabled')
             self.assertEqual(str(win.chk_skip_full.cget('state')), 'disabled')
             self.assertEqual(str(win.chk_only_pending.cget('state')), 'disabled')
             self.assertEqual(str(win.btn_one_click.cget('state')), 'disabled')
+            self.assertEqual(str(win.btn_pick_cover.cget('state')), 'disabled')
+            self.assertEqual(str(win.btn_pick_artist.cget('state')), 'disabled')
+            self.assertEqual(str(win.btn_pick_lyric.cget('state')), 'disabled')
+            self.assertEqual(str(win.btn_sacd.cget('state')), 'disabled')
+            self.assertEqual(str(win.btn_search.cget('state')), 'disabled')
+            self.assertEqual(str(win.btn_clear_search.cget('state')), 'disabled')
+            self.assertEqual(str(win.cmb_search_type.cget('state')), 'disabled')
+            self.assertEqual(str(win.ent_search.cget('state')), 'disabled')
             for b in win.field_buttons.values():
                 self.assertEqual(str(b.cget('state')), 'disabled')
 
@@ -136,8 +150,22 @@ class CliGuiTests(TempTrackTestCase):
             self.assertEqual(str(win.chk_skip_full.cget('state')), 'normal')
             self.assertEqual(str(win.chk_only_pending.cget('state')), 'normal')
             self.assertEqual(str(win.btn_one_click.cget('state')), 'normal')
+            self.assertEqual(str(win.btn_pick_cover.cget('state')), 'normal')
+            self.assertEqual(str(win.btn_pick_artist.cget('state')), 'normal')
+            self.assertEqual(str(win.btn_pick_lyric.cget('state')), 'normal')
+            self.assertEqual(str(win.btn_sacd.cget('state')), 'normal')
+            self.assertEqual(str(win.btn_search.cget('state')), 'normal')
+            self.assertEqual(str(win.btn_clear_search.cget('state')), 'normal')
+            self.assertEqual(str(win.cmb_search_type.cget('state')), 'readonly')
+            self.assertEqual(str(win.ent_search.cget('state')), 'normal')
             for b in win.field_buttons.values():
                 self.assertEqual(str(b.cget('state')), 'normal')
+
+            # 验证点击 _on_pick_artist 正确解析文件名线索/标签并拉起 ArtistPickerDialog
+            win.checked_paths.add(tr_stale.path)
+            with patch('ui.main_window.ArtistPickerDialog') as mock_art_dlg:
+                win._on_pick_artist()
+                self.assertTrue(mock_art_dlg.called)
 
     def test_execute_repairs_sync_only(self):
         fp = self._make_minimal_flac(os.path.join(self.tmp, 'sync_me.flac'))
@@ -148,7 +176,7 @@ class CliGuiTests(TempTrackTestCase):
             title='Sync',
             disk_tracknumber='1',
             disk_track_int=1,
-            status=STATUS_STALE_FOOBAR,
+            status=STATUS_STALE_PLAYER,
         )
         env = FoobarEnv(library_folders=[self.tmp])
         with patch('app.sync_files_to_foobar', return_value=(1, True)) as mock_sync:
@@ -434,12 +462,14 @@ class CliGuiTests(TempTrackTestCase):
             ('albumartist', '专辑艺术家'),
             ('artist', '艺术家'),
             ('composer', '作曲'),
+            ('lyricist', '作词'),
+            ('arranger', '编曲'),
             ('genre', '流派'),
             ('tracknumber', '音轨号'),
             ('discnumber', '碟片编号'),
         ]
 
-        # 1) 验证 GUI 具备 8 个独立修复项按钮（不含表演者），且支持全不选 / 单选过滤 / 全选
+        # 1) 验证 GUI 具备 10 个独立修复项按钮（不含表演者），且支持全不选 / 单选过滤 / 全选
         with offscreen_tk() as root:
             win = app_mod.MainWindow(root, auto_scan=False)
             self.assertEqual(list(win.field_buttons.keys()), [k for k, _ in expected_buttons])
@@ -702,7 +732,7 @@ class CliGuiTests(TempTrackTestCase):
             self.assertEqual(tr1.genre, '')
             self.assertIn('composer', tr1.missing_extra_fields)
             self.assertEqual(tr1.tag_updates.get('genre'), 'Pop')
-            self.assertTrue(tr1.needs_foobar_sync)
+            self.assertTrue(tr1.needs_player_sync)
             self.assertNotIn(fp1, win.checked_paths)
             self.assertEqual(win.tree.item(fp1, 'values')[1], '已删除')
 
@@ -762,6 +792,7 @@ class CliGuiTests(TempTrackTestCase):
             dlg = None
             try:
                 dlg = app_mod.SetMetadataDialog(root, tracks, default_sync=False)
+                self.assertEqual(dlg.chk_sync.cget('text'), '写入后刷新播放器缓存')
                 dlg.var_key.set('genre (流派)')
                 dlg.var_val.set('Synthpop')
                 dlg._on_add()
@@ -855,6 +886,7 @@ class CliGuiTests(TempTrackTestCase):
                 dlg = None
                 try:
                     dlg = app_mod.ConvertFormatDialog(root, tracks, default_sync=False)
+                    self.assertEqual(dlg.chk_sync.cget('text'), '转换后刷新播放器缓存')
                     dlg.var_format.set('m4a')
                     dlg.var_overwrite.set(True)
                     dlg.var_delete_source.set(False)
@@ -899,21 +931,21 @@ class CliGuiTests(TempTrackTestCase):
                 self.assertNotIn('foobar待刷新', win.var_summary.get())
                 self.assertIn('系统音乐目录', win.var_env.get())
 
-                # 非 foobar 环境下更新曲目信息不应误标为 foobar 缓存过期
+                # 非播放器环境下更新曲目信息不应误标为缓存过期
                 tr = win.tracks[0]
                 win._sync_track_from_info(tr, read_audio_info(fp1), synced=False)
-                self.assertFalse(tr.needs_foobar_sync)
+                self.assertFalse(tr.needs_player_sync)
 
-                # 模态弹窗在 has_foobar=False 时隐藏 foobar 缓存选项
-                dlg_set = app_mod.SetMetadataDialog(root, [tr], default_sync=False, has_foobar=False)
+                # 模态弹窗在 has_player=False 时隐藏播放器缓存选项
+                dlg_set = app_mod.SetMetadataDialog(root, [tr], default_sync=False, has_player=False)
                 self.assertEqual(dlg_set.chk_sync.winfo_manager(), '')
                 dlg_set._on_cancel()
 
-                dlg_del = app_mod.DeleteMetadataDialog(root, [tr], default_sync=False, has_foobar=False)
+                dlg_del = app_mod.DeleteMetadataDialog(root, [tr], default_sync=False, has_player=False)
                 self.assertEqual(dlg_del.chk_sync.winfo_manager(), '')
                 dlg_del._on_cancel()
 
-                dlg_conv = app_mod.ConvertFormatDialog(root, [tr], default_sync=False, has_foobar=False)
+                dlg_conv = app_mod.ConvertFormatDialog(root, [tr], default_sync=False, has_player=False)
                 self.assertEqual(dlg_conv.chk_sync.winfo_manager(), '')
                 dlg_conv._on_cancel()
 
@@ -1019,7 +1051,7 @@ class CliGuiTests(TempTrackTestCase):
         tracks = ls_mod.scan_library(folders=[self.tmp], include_art_scan=False)
         self.assertEqual(len(tracks), 1)
         self.assertEqual(tracks[0].title, 'Standalone')
-        self.assertFalse(tracks[0].needs_foobar_sync)
+        self.assertFalse(tracks[0].needs_player_sync)
         self.assertEqual(ls_mod.touch_files_mtime([fp]), 1)
 
     def test_cli_artist_art_arguments_and_parser(self):
@@ -1053,6 +1085,7 @@ class CliGuiTests(TempTrackTestCase):
         with offscreen_tk() as root:
             tr = LibraryTrack(path=os.path.join(self.tmp, 'test.flac'), filename='test.flac', folder=self.tmp)
             dlg = app_mod.DeleteMetadataDialog(root, [tr])
+            self.assertEqual(dlg.chk_sync.cget('text'), '删除后刷新播放器缓存')
             self.assertIn('artist_cover', dlg.field_vars)
             self.assertTrue(hasattr(dlg, 'chk_delete_folder_artist'))
             self.assertEqual(str(dlg.chk_delete_folder_artist.cget('state')), 'disabled')
@@ -1083,3 +1116,834 @@ class CliGuiTests(TempTrackTestCase):
             win.var_artist_art.set(True)
             opts_on = win._current_options()
             self.assertTrue(opts_on.enable_artist_art)
+
+    def test_gui_header_multistate_checkbox(self):
+        """测试“选择”列表头的多状态复选框（全选/全不选/半选切换联动）。"""
+        with offscreen_tk() as root:
+            win = app_mod.MainWindow(root, auto_scan=False)
+            win.var_only_pending.set(False)
+            # 未扫描或无曲目时，表头为全不选 '☐ 选择'
+            self.assertEqual(win.tree.heading('chk', 'text'), '☐ 选择')
+
+            fp1 = self._make_minimal_flac(os.path.join(self.tmp, 'chk1.flac'))
+            fp2 = self._make_minimal_flac(os.path.join(self.tmp, 'chk2.flac'))
+            tr1 = LibraryTrack(path=fp1, filename='chk1.flac', container='flac', folder=self.tmp, status=STATUS_OK)
+            tr2 = LibraryTrack(path=fp2, filename='chk2.flac', container='flac', folder=self.tmp, status=STATUS_OK)
+            win.tracks = [tr1, tr2]
+
+            # 1. 全部未勾选 -> '☐ 选择'
+            win.checked_paths.clear()
+            win._refresh_table()
+            self.assertEqual(win.tree.heading('chk', 'text'), '☐ 选择')
+
+            # 2. 单曲勾选 -> 半选 '▣ 选择'
+            win._toggle_row(tr1.path)
+            self.assertEqual(win.tree.heading('chk', 'text'), '▣ 选择')
+
+            # 3. 两首全勾选 -> 全选 '☑ 选择'
+            win._toggle_row(tr2.path)
+            self.assertEqual(win.tree.heading('chk', 'text'), '☑ 选择')
+
+            # 4. 全选状态下触发表头/全选切换 -> 全不选 '☐ 选择'
+            win._toggle_select_all()
+            self.assertEqual(win.tree.heading('chk', 'text'), '☐ 选择')
+            self.assertEqual(len(win.checked_paths), 0)
+
+            # 5. 全不选状态下触发表头/全选切换 -> 全选 '☑ 选择'
+            win._toggle_select_all()
+            self.assertEqual(win.tree.heading('chk', 'text'), '☑ 选择')
+            self.assertEqual(len(win.checked_paths), 2)
+
+            # 6. 取消一首变半选，再点击表头切换 -> 变为全选 '☑ 选择'
+            win._toggle_row(tr1.path)
+            self.assertEqual(win.tree.heading('chk', 'text'), '▣ 选择')
+            win._toggle_select_all()
+            self.assertEqual(win.tree.heading('chk', 'text'), '☑ 选择')
+            self.assertEqual(len(win.checked_paths), 2)
+
+    def test_gui_artist_art_filtering_and_mp4_nodata(self):
+        """测试单选“获取艺术家图”时：目录已有图的MP4不误报缺图，真正缺外置图的nodata条目能正常筛选。"""
+        with offscreen_tk() as root:
+            win = app_mod.MainWindow(root, auto_scan=False)
+            fp_mp4 = os.path.join(self.tmp, 'test_song.m4a')
+            fp_nodata = os.path.join(self.tmp, 'need_art.flac')
+
+            # 1. 模拟 MP4 文件：所在目录已有外置 artist.jpg (folder_artist_action='ok')
+            tr_mp4 = LibraryTrack(
+                path=fp_mp4, filename='test_song.m4a', container='mp4', folder=self.tmp,
+                status=STATUS_OK, has_artist_art=False, needs_artist_art=False,
+                artist_status='正常', folder_artist_action='ok',
+            )
+
+            # 2. 模拟某曲目：目录缺失 artist.jpg (folder_artist_action='nodata')
+            tr_nodata = LibraryTrack(
+                path=fp_nodata, filename='need_art.flac', container='flac', folder=self.tmp,
+                status=STATUS_OK, has_artist_art=False, needs_artist_art=True,
+                artist_status='缺艺术家图', folder_artist_action='nodata', note='缺艺术家图',
+            )
+            win.tracks = [tr_mp4, tr_nodata]
+
+            # 仅勾选“获取艺术家图”，开启“只显示待处理曲目”
+            for v in win.field_vars.values():
+                v.set(False)
+            win.var_artist_art.set(True)
+            win.var_only_pending.set(True)
+            win._refresh_table()
+
+            # 验证：MP4曲目不误报待处理，而真正缺艺术家图的 nodata 曲目被正确筛选展示
+            self.assertEqual(len(win.visible_tracks), 1)
+            self.assertEqual(win.visible_tracks[0].path, tr_nodata.path)
+            vals_mp4, _ = win._row_values(tr_mp4)
+            self.assertNotIn('缺艺术家图', vals_mp4[8])
+            vals_nodata, _ = win._row_values(tr_nodata)
+            self.assertIn('缺艺术家图', vals_nodata[8])
+
+    def test_on_fix_finished_does_not_popup_dialog(self):
+        """测试修复完成时不弹出提示窗，仅更新日志和状态栏。"""
+        with offscreen_tk() as root:
+            with patch('app.messagebox.showinfo') as m_info:
+                win = app_mod.MainWindow(root, auto_scan=False)
+                summary = {
+                    'written_ok': 5,
+                    'written_fail': 0,
+                    'cover_fixed': 2,
+                    'tags_fixed': 3,
+                    'date_fixed': 1,
+                    'lyrics_fixed': 1,
+                    'artist_fixed': 1,
+                    'folder_cover_ok': 1,
+                    'folder_cover_fail': 0,
+                    'folder_artist_ok': 1,
+                    'folder_artist_fail': 0,
+                    'synced_stale': 2,
+                    'unmatched': 0,
+                    'date_unmatched': 0,
+                    'lyrics_unmatched': 0,
+                    'touched': 2,
+                }
+                win._on_fix_finished(summary)
+                # 不应弹出任何消息窗
+                m_info.assert_not_called()
+                # 状态栏应更新修复结果文本
+                self.assertIn('修复完成：文件写入 5 首', win.var_status.get())
+
+    def test_gui_table_layout_and_window_geometry(self):
+        """测试列表版面布局（列宽、最小宽、伸缩属性、居中）与默认窗口尺寸配置。"""
+        with offscreen_tk() as root:
+            win = app_mod.MainWindow(root, auto_scan=False)
+
+            # 验证各列属性
+            # 1. 选择列：足够宽度显示 '☑ 选择'，居中，不拉伸
+            chk_cfg = win.tree.column('chk')
+            self.assertGreaterEqual(chk_cfg['width'], 60)
+            self.assertEqual(chk_cfg['anchor'], 'center')
+            self.assertEqual(chk_cfg['stretch'], 0)
+
+            # 2. 歌曲名、艺术家、专辑、说明 具备 stretch=True，以便随窗口自适应扩展
+            for col in ('title', 'artist', 'album', 'note'):
+                col_cfg = win.tree.column(col)
+                self.assertEqual(col_cfg['stretch'], 1, f'{col} should stretch')
+                self.assertGreaterEqual(col_cfg['width'], 140)
+
+            # 3. 封面状态、综合状态、音轨号 居中显示
+            for col in ('status', 'track', 'cover'):
+                col_cfg = win.tree.column(col)
+                self.assertEqual(col_cfg['anchor'], 'center')
+                self.assertEqual(col_cfg['stretch'], 0)
+
+            # 4. 验证默认窗口尺寸适应屏幕且保存机制
+            win._save_user_state()
+            self.assertIn('window_geometry', win._user_config)
+
+    def test_gui_column_header_sorting(self):
+        """测试点击表头支持正序、倒序及清除排序（恢复原扫描顺序），包含指示箭头与自然排序。"""
+        with offscreen_tk() as root:
+            win = app_mod.MainWindow(root, auto_scan=False)
+            t1 = LibraryTrack(
+                path='track_b.flac', filename='track_b.flac', container='flac', folder=self.tmp,
+                title='Song B', artist='Artist Y', album='Album M', disk_track_int=10, disk_tracknumber='10',
+                status=STATUS_OK,
+            )
+            t2 = LibraryTrack(
+                path='track_a.flac', filename='track_a.flac', container='flac', folder=self.tmp,
+                title='Song A', artist='Artist Z', album='Album N', disk_track_int=2, disk_tracknumber='2',
+                status=STATUS_OK,
+            )
+            t3 = LibraryTrack(
+                path='track_c.flac', filename='track_c.flac', container='flac', folder=self.tmp,
+                title='Song C', artist='Artist X', album='Album L', disk_track_int=1, disk_tracknumber='1',
+                status=STATUS_OK,
+            )
+            win.tracks = [t1, t2, t3]
+            win.var_only_pending.set(False)
+            win._refresh_table()
+
+            # 初始状态：默认排序 [专辑艺术家-艺术家-时间-专辑-音轨号-歌曲名]
+            # t3 (Artist X) < t1 (Artist Y) < t2 (Artist Z)
+            self.assertEqual([t.path for t in win.visible_tracks], ['track_c.flac', 'track_b.flac', 'track_a.flac'])
+            self.assertEqual(win.tree.heading('title', 'text'), '歌曲名')
+
+            # 1. 第一次点击「歌曲名」：升序排列 (▲) -> Song A, Song B, Song C
+            win._on_heading_click('title')
+            self.assertEqual(win._sort_col, 'title')
+            self.assertFalse(win._sort_reverse)
+            self.assertEqual(win.tree.heading('title', 'text'), '歌曲名 ▲')
+            self.assertEqual([t.title for t in win.visible_tracks], ['Song A', 'Song B', 'Song C'])
+
+            # 2. 第二次点击「歌曲名」：降序排列 (▼) -> Song C, Song B, Song A
+            win._on_heading_click('title')
+            self.assertEqual(win._sort_col, 'title')
+            self.assertTrue(win._sort_reverse)
+            self.assertEqual(win.tree.heading('title', 'text'), '歌曲名 ▼')
+            self.assertEqual([t.title for t in win.visible_tracks], ['Song C', 'Song B', 'Song A'])
+
+            # 3. 第三次点击「歌曲名」：取消排序，恢复默认排序，箭头移除
+            win._on_heading_click('title')
+            self.assertIsNone(win._sort_col)
+            self.assertFalse(win._sort_reverse)
+            self.assertEqual(win.tree.heading('title', 'text'), '歌曲名')
+            self.assertEqual([t.path for t in win.visible_tracks], ['track_c.flac', 'track_b.flac', 'track_a.flac'])
+
+            # 4. 点击「音轨号」：按数字自然排序（2 在 10 之前，而非字符串字典序）
+            win._on_heading_click('track')
+            self.assertEqual(win._sort_col, 'track')
+            self.assertEqual(win.tree.heading('track', 'text'), '音轨号 ▲')
+            self.assertEqual([t.disk_track_int for t in win.visible_tracks], [1, 2, 10])
+
+            # 5. 点击「艺术家」：旧列「音轨号」箭头移除，新列显示箭头并按艺术家排序
+            win._on_heading_click('artist')
+            self.assertEqual(win.tree.heading('track', 'text'), '音轨号')
+            self.assertEqual(win.tree.heading('artist', 'text'), '艺术家 ▲')
+            self.assertEqual([t.artist for t in win.visible_tracks], ['Artist X', 'Artist Y', 'Artist Z'])
+
+    def test_default_sort_order_hierarchy(self):
+        """测试默认排序层级 [专辑艺术家-艺术家-时间-专辑-音轨号-歌曲名]。"""
+        with offscreen_tk() as root:
+            win = app_mod.MainWindow(root, auto_scan=False)
+            tracks = [
+                # 同专辑艺术家、同艺术家、同专辑、音轨2
+                LibraryTrack(path='p4.flac', filename='p4.flac', container='flac', folder=self.tmp,
+                             albumartist='AA1', artist='A1', date='2000', album='Alb1', disk_track_int=2, title='Song2'),
+                # 同专辑艺术家、同艺术家、同时间、不同专辑 Alb2
+                LibraryTrack(path='p5.flac', filename='p5.flac', container='flac', folder=self.tmp,
+                             albumartist='AA1', artist='A1', date='2000', album='Alb2', disk_track_int=1, title='Song1'),
+                # 专辑艺术家 AA2 (排在 AA1 之后)
+                LibraryTrack(path='p6.flac', filename='p6.flac', container='flac', folder=self.tmp,
+                             albumartist='AA2', artist='A1', date='1990', album='Alb1', disk_track_int=1, title='Song1'),
+                # 同专辑艺术家、同艺术家、更晚时间 2005
+                LibraryTrack(path='p7.flac', filename='p7.flac', container='flac', folder=self.tmp,
+                             albumartist='AA1', artist='A1', date='2005', album='Alb1', disk_track_int=1, title='Song1'),
+                # 同专辑艺术家、同艺术家、同专辑、音轨1 (应排在音轨2之前)
+                LibraryTrack(path='p3.flac', filename='p3.flac', container='flac', folder=self.tmp,
+                             albumartist='AA1', artist='A1', date='2000', album='Alb1', disk_track_int=1, title='Song1'),
+                # 同专辑艺术家 AA1、不同艺术家 A2
+                LibraryTrack(path='p2.flac', filename='p2.flac', container='flac', folder=self.tmp,
+                             albumartist='AA1', artist='A2', date='1995', album='Alb1', disk_track_int=1, title='Song1'),
+            ]
+            win.tracks = tracks
+            win.var_only_pending.set(False)
+            win._refresh_table()
+
+            expected = ['p3.flac', 'p4.flac', 'p5.flac', 'p7.flac', 'p2.flac', 'p6.flac']
+            self.assertEqual([t.path for t in win.visible_tracks], expected)
+
+    def test_main_window_pick_cover_with_checkbox_or_single_track(self):
+        with offscreen_tk() as root:
+            win = app_mod.MainWindow(root, auto_scan=False)
+            t1 = LibraryTrack(path='D:/Music/test1.flac', filename='test1.flac', folder='D:/Music', title='Test1', artist='Singer')
+            t2 = LibraryTrack(path='D:/Music/test2.flac', filename='test2.flac', folder='D:/Music', title='Test2', artist='Singer')
+            win.tracks = [t1, t2]
+            win.visible_tracks = [t1, t2]
+
+            # 场景 1：无高亮也无勾选 -> 提示弹窗
+            with patch('ui.main_window._msgbox.showinfo') as mock_info:
+                win._on_pick_cover()
+                mock_info.assert_called_once()
+
+            # 场景 2：有复选框勾选（未点成蓝色高亮） -> 自动采纳已勾选曲目并打开弹窗
+            win.checked_paths = {'D:/Music/test2.flac'}
+            with patch('ui.main_window.CoverPickerDialog') as mock_dlg:
+                win._on_pick_cover()
+                grps = mock_dlg.call_args[0][1]
+                self.assertEqual(grps[0]['rep_track'], t2)
+
+            # 场景 3：无高亮无勾选，但当前视图仅有唯一曲目 -> 贴心自动采纳
+            win.checked_paths.clear()
+            win.visible_tracks = [t1]
+            with patch('ui.main_window.CoverPickerDialog') as mock_dlg:
+                win._on_pick_cover()
+                grps = mock_dlg.call_args[0][1]
+                self.assertEqual(grps[0]['rep_track'], t1)
+
+            # 场景 4：勾选跨越两个不同目录的曲目 -> 自动聚合为 2 个专辑组 (多专辑向导)
+            t3 = LibraryTrack(path='D:/Other/t3.flac', filename='t3.flac', folder='D:/Other', title='T3', artist='SingerB')
+            win.tracks = [t1, t2, t3]
+            win.checked_paths = {'D:/Music/test1.flac', 'D:/Other/t3.flac'}
+            with patch('ui.main_window.CoverPickerDialog') as mock_dlg:
+                win._on_pick_cover()
+                grps = mock_dlg.call_args[0][1]
+                self.assertEqual(len(grps), 2)
+                self.assertEqual({g['folder'] for g in grps}, {'D:/Music', 'D:/Other'})
+
+    def test_main_window_right_click_copy_column_fields(self):
+        with offscreen_tk() as root:
+            win = app_mod.MainWindow(root, auto_scan=False)
+            t1 = LibraryTrack(
+                path='D:/Music/Jay/01. Nocturne.flac',
+                filename='01. Nocturne.flac',
+                folder='D:/Music/Jay',
+                title='夜曲',
+                artist='周杰伦',
+                album='十一月的萧邦',
+                disk_tracknumber='01',
+                status=STATUS_OK,
+            )
+            t2 = LibraryTrack(
+                path='D:/Music/Jay/02. Blue Storm.flac',
+                filename='02. Blue Storm.flac',
+                folder='D:/Music/Jay',
+                title='蓝色风暴',
+                artist='周杰伦',
+                album='十一月的萧邦',
+                disk_tracknumber='02',
+                status=STATUS_OK,
+            )
+            win.tracks = [t1, t2]
+            win.visible_tracks = [t1, t2]
+            win.var_only_pending.set(False)
+            win._refresh_table()
+
+            class FakeEvent:
+                def __init__(self, x=10, y=10, x_root=100, y_root=100):
+                    self.x = x
+                    self.y = y
+                    self.x_root = x_root
+                    self.y_root = y_root
+
+            # 1. 验证右键点击“艺术家”列：识别列为 artist，生成“📋 复制艺术家: 周杰伦”且可成功复制
+            with patch.object(win.tree, 'identify_row', return_value=t1.path), \
+                 patch.object(win.tree, 'identify_column', return_value='#4'), \
+                 patch('tkinter.Menu.post') as mock_post:
+                ev = FakeEvent()
+                win._on_tree_right_click(ev)
+                mock_post.assert_called_once()
+                menu = win._last_context_menu
+
+                # 检查菜单项中是否包含复制当前列
+                labels = [menu.entrycget(i, 'label') for i in range(menu.index('end') + 1) if menu.type(i) != 'separator']
+                copy_artist_label = next(l for l in labels if '复制艺术家' in l)
+                self.assertIn('周杰伦', copy_artist_label)
+
+                # 触发点击该菜单项并验证剪贴板
+                menu_idx = next(i for i in range(menu.index('end') + 1) if menu.type(i) != 'separator' and menu.entrycget(i, 'label') == copy_artist_label)
+                menu.invoke(menu_idx)
+                self.assertEqual(root.clipboard_get(), '周杰伦')
+                self.assertIn('已复制艺术家到剪贴板', win.var_status.get())
+
+                # 验证联动搜索项“🔍 筛选此艺术家”存在并可正常触发
+                filter_artist_label = next(l for l in labels if '筛选此艺术家' in l)
+                self.assertIn('周杰伦', filter_artist_label)
+                filter_idx = next(i for i in range(menu.index('end') + 1) if menu.type(i) != 'separator' and menu.entrycget(i, 'label') == filter_artist_label)
+                menu.invoke(filter_idx)
+                self.assertEqual(win.var_search_type.get(), '艺术家')
+                self.assertEqual(win.var_search.get(), '周杰伦')
+
+                # 验证右键菜单去重与项完整性：挑选封面与歌词等命令无重复，且结构完整
+                cover_entries = [l for l in labels if '挑选专辑封面' in l]
+                lyric_entries = [l for l in labels if '歌词' in l]
+                self.assertEqual(len(cover_entries), 1)
+                self.assertEqual(cover_entries[0], '🖼️ 挑选专辑封面 (cover.jpg)...')
+                self.assertEqual(len(lyric_entries), 1)
+                self.assertEqual(lyric_entries[0], '🎵 挑选/更换歌词 (lrc)...')
+                self.assertTrue(any('挑选写真' in l for l in labels))
+                self.assertTrue(any('设置标签' in l for l in labels))
+                self.assertTrue(any('在文件管理器中显示' in l for l in labels))
+
+            # 2. 验证右键点击“歌曲名”列：识别列为 title
+            with patch.object(win.tree, 'identify_row', return_value=t1.path), \
+                 patch.object(win.tree, 'identify_column', return_value='#3'), \
+                 patch('tkinter.Menu.post'):
+                win._on_tree_right_click(FakeEvent())
+                menu = win._last_context_menu
+                labels = [menu.entrycget(i, 'label') for i in range(menu.index('end') + 1) if menu.type(i) != 'separator']
+                copy_title_label = next(l for l in labels if '复制歌曲名' in l)
+                self.assertIn('夜曲', copy_title_label)
+                menu_idx = next(i for i in range(menu.index('end') + 1) if menu.type(i) != 'separator' and menu.entrycget(i, 'label') == copy_title_label)
+                menu.invoke(menu_idx)
+                self.assertEqual(root.clipboard_get(), '夜曲')
+
+            # 3. 验证右键点击“音轨号”列：识别列为 track
+            with patch.object(win.tree, 'identify_row', return_value=t1.path), \
+                 patch.object(win.tree, 'identify_column', return_value='#6'), \
+                 patch('tkinter.Menu.post'):
+                win._on_tree_right_click(FakeEvent())
+                menu = win._last_context_menu
+                labels = [menu.entrycget(i, 'label') for i in range(menu.index('end') + 1) if menu.type(i) != 'separator']
+                copy_track_label = next(l for l in labels if '复制音轨号' in l)
+                self.assertIn('01', copy_track_label)
+                menu_idx = next(i for i in range(menu.index('end') + 1) if menu.type(i) != 'separator' and menu.entrycget(i, 'label') == copy_track_label)
+                menu.invoke(menu_idx)
+                self.assertEqual(root.clipboard_get(), '01')
+
+            # 4. 验证右键点击空字段列时置灰禁用
+            t1.album = ''
+            with patch.object(win.tree, 'identify_row', return_value=t1.path), \
+                 patch.object(win.tree, 'identify_column', return_value='#5'), \
+                 patch('tkinter.Menu.post'):
+                win._on_tree_right_click(FakeEvent())
+                menu = win._last_context_menu
+                labels = [menu.entrycget(i, 'label') for i in range(menu.index('end') + 1) if menu.type(i) != 'separator']
+                copy_album_label = next(l for l in labels if '复制专辑' in l)
+                self.assertIn('(空)', copy_album_label)
+                menu_idx = next(i for i in range(menu.index('end') + 1) if menu.type(i) != 'separator' and menu.entrycget(i, 'label') == copy_album_label)
+                self.assertEqual(str(menu.entrycget(menu_idx, 'state')), 'disabled')
+
+            # 5. 验证多选勾选时更多复制子菜单支持批量复制
+            t1.album = '十一月的萧邦'
+            win.checked_paths = {t1.path, t2.path}
+            with patch.object(win.tree, 'identify_row', return_value=t1.path), \
+                 patch.object(win.tree, 'identify_column', return_value='#3'), \
+                 patch('tkinter.Menu.post'):
+                win._on_tree_right_click(FakeEvent())
+                menu = win._last_context_menu
+                # 找到子菜单
+                cascade_idx = next(i for i in range(menu.index('end') + 1) if menu.type(i) == 'cascade')
+                sub_menu = menu.nametowidget(menu.entrycget(cascade_idx, 'menu'))
+                sub_labels = [sub_menu.entrycget(i, 'label') for i in range(sub_menu.index('end') + 1) if sub_menu.type(i) != 'separator']
+                self.assertTrue(any('复制已勾选的歌曲名 (共 2 首)' in l for l in sub_labels))
+                self.assertTrue(any('复制已勾选的完整路径 (共 2 首)' in l for l in sub_labels))
+
+                # 点击批量复制歌曲名
+                batch_title_idx = next(i for i in range(sub_menu.index('end') + 1) if sub_menu.type(i) != 'separator' and '复制已勾选的歌曲名' in sub_menu.entrycget(i, 'label'))
+                sub_menu.invoke(batch_title_idx)
+                self.assertEqual(root.clipboard_get(), '夜曲\n蓝色风暴')
+
+            # 6. 验证右键点击状态、封面、说明及复选框列（视点击位置而定）
+            # 6.1 综合状态列 (#2)
+            with patch.object(win.tree, 'identify_row', return_value=t1.path), \
+                 patch.object(win.tree, 'identify_column', return_value='#2'), \
+                 patch('tkinter.Menu.post'):
+                win._on_tree_right_click(FakeEvent())
+                menu = win._last_context_menu
+                labels = [menu.entrycget(i, 'label') for i in range(menu.index('end') + 1) if menu.type(i) != 'separator']
+                self.assertTrue(any('复制综合状态' in l for l in labels))
+
+            # 6.2 封面状态列 (#7)
+            with patch.object(win.tree, 'identify_row', return_value=t1.path), \
+                 patch.object(win.tree, 'identify_column', return_value='#7'), \
+                 patch('tkinter.Menu.post'):
+                win._on_tree_right_click(FakeEvent())
+                menu = win._last_context_menu
+                labels = [menu.entrycget(i, 'label') for i in range(menu.index('end') + 1) if menu.type(i) != 'separator']
+                self.assertTrue(any('复制封面状态' in l for l in labels))
+
+            # 6.3 复选框/路径列 (#1)
+            with patch.object(win.tree, 'identify_row', return_value=t1.path), \
+                 patch.object(win.tree, 'identify_column', return_value='#1'), \
+                 patch('tkinter.Menu.post'):
+                win._on_tree_right_click(FakeEvent())
+                menu = win._last_context_menu
+                labels = [menu.entrycget(i, 'label') for i in range(menu.index('end') + 1) if menu.type(i) != 'separator']
+                copy_path_label = next(l for l in labels if '复制文件路径' in l)
+                self.assertIn('D:/Music', copy_path_label)
+                menu_idx = next(i for i in range(menu.index('end') + 1) if menu.type(i) != 'separator' and menu.entrycget(i, 'label') == copy_path_label)
+                menu.invoke(menu_idx)
+                self.assertEqual(root.clipboard_get(), t1.path)
+
+            # 6.4 点击非指定列区域（如 #0 或超出列范围）：缺省回退为安全复制文件路径
+            with patch.object(win.tree, 'identify_row', return_value=t1.path), \
+                 patch.object(win.tree, 'identify_column', return_value='#0'), \
+                 patch('tkinter.Menu.post'):
+                win._on_tree_right_click(FakeEvent())
+                menu = win._last_context_menu
+                labels = [menu.entrycget(i, 'label') for i in range(menu.index('end') + 1) if menu.type(i) != 'separator']
+                self.assertTrue(any('复制文件路径' in l for l in labels))
+
+            # 7. 验证子菜单中的文件名、目录路径与整行 TSV 复制功能
+            with patch.object(win.tree, 'identify_row', return_value=t1.path), \
+                 patch.object(win.tree, 'identify_column', return_value='#3'), \
+                 patch('tkinter.Menu.post'):
+                win._on_tree_right_click(FakeEvent())
+                menu = win._last_context_menu
+                cascade_idx = next(i for i in range(menu.index('end') + 1) if menu.type(i) == 'cascade')
+                sub_menu = menu.nametowidget(menu.entrycget(cascade_idx, 'menu'))
+
+                # 复制文件名
+                fn_idx = next(i for i in range(sub_menu.index('end') + 1) if sub_menu.type(i) != 'separator' and '复制文件名' in sub_menu.entrycget(i, 'label'))
+                sub_menu.invoke(fn_idx)
+                self.assertEqual(root.clipboard_get(), '01. Nocturne.flac')
+
+                # 复制所在目录路径
+                dir_idx = next(i for i in range(sub_menu.index('end') + 1) if sub_menu.type(i) != 'separator' and '复制所在目录路径' in sub_menu.entrycget(i, 'label'))
+                sub_menu.invoke(dir_idx)
+                self.assertEqual(root.clipboard_get(), 'D:/Music/Jay')
+
+                # 复制整行数据
+                tsv_idx = next(i for i in range(sub_menu.index('end') + 1) if sub_menu.type(i) != 'separator' and '复制整行数据' in sub_menu.entrycget(i, 'label'))
+                sub_menu.invoke(tsv_idx)
+                self.assertIn('夜曲', root.clipboard_get())
+                self.assertIn('周杰伦', root.clipboard_get())
+
+    def test_gui_search_field_and_project_types(self):
+        """测试页面搜索框、搜索项目类型选择下拉框（专辑名、艺术家、歌曲名等）及实时过滤筛选联动。"""
+        with offscreen_tk() as root:
+            win = app_mod.MainWindow(root, auto_scan=False)
+
+            # 1. 验证搜索控件初始化与配置
+            self.assertTrue(hasattr(win, 'cmb_search_type'))
+            self.assertTrue(hasattr(win, 'ent_search'))
+            self.assertIsInstance(win.ent_search, ttk.Entry)
+            self.assertTrue(hasattr(win, 'btn_search'))
+            self.assertTrue(hasattr(win, 'btn_clear_search'))
+            self.assertTrue(hasattr(win, 'lbl_search_info'))
+
+            search_values = list(win.cmb_search_type.cget('values'))
+            for expected_type in ('全部', '歌曲名', '艺术家', '专辑名', '专辑艺术家', '音轨号', '文件路径', '说明/备注'):
+                self.assertIn(expected_type, search_values)
+            self.assertEqual(win.var_search_type.get(), '全部')
+            self.assertEqual(win.var_search.get(), '')
+
+            # 2. 构造测试数据
+            t1 = LibraryTrack(
+                path='D:/Music/Jay/01. Seven.flac',
+                filename='01. Seven.flac',
+                folder='D:/Music/Jay',
+                title='七里香',
+                artist='周杰伦',
+                albumartist='周杰伦',
+                album='七里香',
+                disk_tracknumber='01',
+                disk_track_int=1,
+                status=STATUS_OK,
+            )
+            t2 = LibraryTrack(
+                path='D:/Music/Jay/03. Sunny.mp3',
+                filename='03. Sunny.mp3',
+                folder='D:/Music/Jay',
+                title='晴天',
+                artist='周杰伦',
+                albumartist='周杰伦',
+                album='叶惠美',
+                disk_tracknumber='03',
+                disk_track_int=3,
+                status=STATUS_OK,
+            )
+            t3 = LibraryTrack(
+                path='D:/Music/Eason/01. Ten.flac',
+                filename='01. Ten.flac',
+                folder='D:/Music/Eason',
+                title='十年',
+                artist='陈奕迅',
+                albumartist='陈奕迅',
+                album='黑白灰',
+                disk_tracknumber='01',
+                disk_track_int=1,
+                status=STATUS_OK,
+            )
+
+            win.tracks = [t1, t2, t3]
+            win._has_scanned = True
+            win.var_only_pending.set(False)
+            win._refresh_table()
+
+            self.assertEqual(len(win.visible_tracks), 3)
+            self.assertEqual(win.var_search_info.get(), '共 3 首')
+
+            # 3. 按歌曲名搜索
+            win.var_search_type.set('歌曲名')
+            win.var_search.set('晴天')
+            win._apply_search_immediate()
+            self.assertEqual([t.path for t in win.visible_tracks], [t2.path])
+            self.assertEqual(win.var_search_info.get(), '已筛选: 1 / 3 首')
+
+            # 4. 按艺术家搜索
+            win.var_search_type.set('艺术家')
+            win.var_search.set('周杰伦')
+            win._apply_search_immediate()
+            self.assertEqual([t.path for t in win.visible_tracks], [t1.path, t2.path])
+            self.assertEqual(win.var_search_info.get(), '已筛选: 2 / 3 首')
+
+            # 5. 按专辑名搜索
+            win.var_search_type.set('专辑名')
+            win.var_search.set('黑白灰')
+            win._apply_search_immediate()
+            self.assertEqual([t.path for t in win.visible_tracks], [t3.path])
+            self.assertEqual(win.var_search_info.get(), '已筛选: 1 / 3 首')
+
+            # 6. 按音轨号搜索
+            win.var_search_type.set('音轨号')
+            win.var_search.set('01')
+            win._apply_search_immediate()
+            self.assertEqual(len(win.visible_tracks), 2)
+            self.assertIn(t1, win.visible_tracks)
+            self.assertIn(t3, win.visible_tracks)
+
+            # 7. 按文件路径搜索
+            win.var_search_type.set('文件路径')
+            win.var_search.set('Sunny.mp3')
+            win._apply_search_immediate()
+            self.assertEqual([t.path for t in win.visible_tracks], [t2.path])
+
+            # 8. 按全部字段多关键字复合搜索
+            win.var_search_type.set('全部')
+            win.var_search.set('周杰伦 叶惠美')
+            win._apply_search_immediate()
+            self.assertEqual([t.path for t in win.visible_tracks], [t2.path])
+
+            # 9. 筛选状态下的全选与取消全选联动
+            win.var_search_type.set('艺术家')
+            win.var_search.set('周杰伦')
+            win._apply_search_immediate()
+            self.assertEqual(len(win.visible_tracks), 2)
+            win.checked_paths.clear()
+            win._toggle_select_all()
+            self.assertEqual(win.checked_paths, {t1.path, t2.path})
+            self.assertNotIn(t3.path, win.checked_paths)
+
+            # 10. 快速清空搜索
+            win._on_clear_search()
+            self.assertEqual(win.var_search.get(), '')
+            self.assertEqual(len(win.visible_tracks), 3)
+            self.assertEqual(win.var_search_info.get(), '共 3 首')
+
+            # 11. 快捷搜索接口 _quick_search
+            win._quick_search('陈奕迅', '艺术家')
+            self.assertEqual(win.var_search_type.get(), '艺术家')
+            self.assertEqual(win.var_search.get(), '陈奕迅')
+            self.assertEqual([t.path for t in win.visible_tracks], [t3.path])
+
+            # 12. 状态保存与 Ctrl+F 热键
+            win._save_user_state()
+            self.assertEqual(win._user_config.get('search_type'), '艺术家')
+            self.assertEqual(win._on_ctrl_f(), 'break')
+
+            # 13. 模拟中文输入法回车上屏英文字符（如 "beyond" 或 "be'yo'n'd"）防假空白与回车延迟触发验证
+            t_beyond = LibraryTrack(
+                path='D:/Music/Beyond/01. Glorious.flac',
+                filename='01. Glorious.flac',
+                folder='D:/Music/Beyond',
+                title='光辉岁月',
+                artist='Beyond',
+                album='乐与怒',
+                status=STATUS_OK,
+            )
+            win.tracks.append(t_beyond)
+            win.var_search_type.set('全部')
+            win.var_search.set('beyond')
+            win._on_entry_key_release()
+            ret_code = win._on_search_return()
+            self.assertEqual(ret_code, 'break')
+            win._apply_search_from_return()
+            self.assertEqual([t.path for t in win.visible_tracks], [t_beyond.path])
+            self.assertEqual(win.ent_search.get(), 'beyond')
+
+            # 14. 验证 busy 状态下搜索栏相关操作与回调均被严格拦截保护，光标、焦点与编辑状态完全禁用
+            win._set_busy(True)
+            self.assertEqual(str(win.btn_search.cget('state')), 'disabled')
+            self.assertEqual(str(win.btn_clear_search.cget('state')), 'disabled')
+            self.assertEqual(str(win.cmb_search_type.cget('state')), 'disabled')
+            self.assertEqual(str(win.ent_search.cget('state')), 'disabled')
+            self.assertEqual(str(win.ent_search.cget('cursor')), 'arrow')
+            self.assertEqual(str(win.ent_search.cget('takefocus')), '0')
+            self.assertEqual(win._on_search_button1(), 'break')
+            self.assertEqual(win._on_search_focus_in(), 'break')
+            self.assertEqual(win._on_entry_key_release(), 'break')
+
+            win.var_search.set('试图修改')
+            win._on_clear_search()
+            self.assertEqual(win.var_search.get(), '试图修改')
+            win._quick_search('周杰伦', '艺术家')
+            self.assertEqual(win.var_search.get(), '试图修改')
+            self.assertEqual(win._on_ctrl_f(), 'break')
+            win._set_busy(False)
+            self.assertEqual(str(win.btn_search.cget('state')), 'normal')
+            self.assertEqual(str(win.btn_clear_search.cget('state')), 'normal')
+            self.assertEqual(str(win.cmb_search_type.cget('state')), 'readonly')
+            self.assertEqual(str(win.ent_search.cget('state')), 'normal')
+            self.assertEqual(str(win.ent_search.cget('takefocus')), '1')
+            self.assertIsNone(win._on_search_button1())
+            self.assertIsNone(win._on_search_focus_in())
+
+    def test_dff_lyrics_repair_in_pipeline(self):
+        """测试在 execute_repairs 管线中针对 DFF 格式曲目补全歌词（mode=both 时平滑保存 .lrc 且不被内嵌写标拦截报错）。"""
+        dff_p = self._make_minimal_dff('01 - 小城故事.dff')
+        tr = app_mod.LibraryTrack(
+            path=dff_p,
+            filename='01 - 小城故事.dff',
+            folder=self.tmp,
+            container='dff',
+            title='小城故事',
+            artist='邓丽君',
+            album='小城故事',
+            needs_lyrics=True,
+            status=STATUS_OK,
+        )
+        env = app_mod.FoobarEnv()
+        mock_match = app_mod.TrackMatch(
+            tracknumber=1,
+            title='小城故事',
+            artist='邓丽君',
+            album_name='小城故事',
+            lyrics='[00:01.00]小城故事多\n[00:04.00]充满喜和乐',
+            source='NetEase',
+        )
+        opts = app_mod.FixOptions(
+            enable_track=False,
+            enable_art=False,
+            enable_tags=False,
+            enable_lyrics=True,
+            lyrics_mode='both',
+        )
+        row_logs = []
+        with patch('pipelines.repair.resolve_track_metadata', return_value=mock_match):
+            summary = app_mod.execute_repairs(
+                env,
+                [tr],
+                opts,
+                row_cb=lambda p, d: row_logs.append((p, d)),
+            )
+        self.assertEqual(summary['written_ok'], 1)
+        self.assertEqual(summary['written_fail'], 0)
+        self.assertEqual(summary['lyrics_fixed'], 1)
+        self.assertTrue(os.path.isfile(dff_p[:-4] + '.lrc'))
+        with open(dff_p[:-4] + '.lrc', 'r', encoding='utf-8') as fp:
+            lrc_content = fp.read()
+        self.assertIn('[ti:小城故事]', lrc_content)
+        self.assertIn('[ar:邓丽君]', lrc_content)
+        self.assertIn('小城故事多', lrc_content)
+        self.assertTrue(any(d.get('fixed_lyrics') for _, d in row_logs))
+        self.assertEqual(row_logs[-1][1].get('status_text'), '已修复')
+
+        # 验证即使同时开启了标签与音轨补全，DFF 也不会因为内嵌写标失败而中断歌词写入
+        dff_p2 = self._make_minimal_dff('02 - 小城故事2.dff')
+        tr2 = app_mod.LibraryTrack(
+            path=dff_p2,
+            filename='02 - 小城故事2.dff',
+            folder=self.tmp,
+            container='dff',
+            title='小城故事2',
+            artist='邓丽君',
+            album='小城故事',
+            needs_lyrics=True,
+            needs_tracknumber=True,
+            status=STATUS_OK,
+        )
+        opts_all = app_mod.FixOptions(
+            enable_track=True,
+            enable_art=True,
+            enable_tags=True,
+            enable_lyrics=True,
+            lyrics_mode='both',
+        )
+        row_logs2 = []
+        with patch('pipelines.repair.resolve_track_metadata', return_value=mock_match):
+            summary2 = app_mod.execute_repairs(
+                env,
+                [tr2],
+                opts_all,
+                row_cb=lambda p, d: row_logs2.append((p, d)),
+            )
+        self.assertEqual(summary2['written_ok'], 1)
+        self.assertEqual(summary2['written_fail'], 0)
+        self.assertEqual(summary2['lyrics_fixed'], 1)
+        self.assertTrue(os.path.isfile(dff_p2[:-4] + '.lrc'))
+
+        # 验证场景 3：DFF 曲目仅有标签待补（无歌词需写）时，必须明确通过 emit_row 提示未能写入标签的原因和建议，不能静默跳过
+        dff_p3 = self._make_minimal_dff('03 - 小城故事3.dff')
+        tr3 = app_mod.LibraryTrack(
+            path=dff_p3,
+            filename='03 - 小城故事3.dff',
+            folder=self.tmp,
+            container='dff',
+            title='小城故事3',
+            artist='',
+            album='',
+            needs_lyrics=False,
+            has_lyrics=True,
+            missing_core_fields=['artist', 'album'],
+            status=STATUS_OK,
+        )
+        opts_tags_only = app_mod.FixOptions(
+            enable_track=False,
+            enable_art=False,
+            enable_tags=True,
+            enable_lyrics=False,
+        )
+        row_logs3 = []
+        with patch('pipelines.repair.resolve_track_metadata', return_value=mock_match):
+            summary3 = app_mod.execute_repairs(
+                env,
+                [tr3],
+                opts_tags_only,
+                row_cb=lambda p, d: row_logs3.append((p, d)),
+            )
+        self.assertEqual(summary3['written_ok'], 0)
+        self.assertEqual(summary3['written_fail'], 1)
+        self.assertTrue(len(row_logs3) > 0)
+        last_row = row_logs3[-1][1]
+        self.assertEqual(last_row.get('status_text'), '只读保护')
+        self.assertIn('DFF 格式遵循发烧规范保护', last_row.get('source_note', ''))
+        self.assertIn('转封装为 .dsf', last_row.get('source_note', ''))
+
+        # 验证针对缺少封面时，封面单元格与状态徽标提示手动挑选而不是“无可用图源”
+        from ui.main_window import _format_cover_cell, _format_status_badge
+        tr_dff_cov = app_mod.LibraryTrack(
+            path=dff_p,
+            filename='01 - 小城故事.dff',
+            folder=self.tmp,
+            container='dff',
+            title='小城故事',
+            artist='邓丽君',
+            album='小城故事',
+            cover_status='缺封面(手动挑选)',
+            cover_reasons=['no-cover-source'],
+            status=STATUS_OK,
+        )
+        self.assertEqual(_format_cover_cell(tr_dff_cov), '缺封面(手动挑选)')
+        badge, color = _format_status_badge(tr_dff_cov)
+        self.assertEqual(badge, '手动挑选')
+        self.assertEqual(color, 'warn')
+
+    def test_main_window_search_filter_scoped_actions(self):
+        """测试搜索筛选激活时，一键修复、挑选封面与标签修改严格遵循「所见即所选」，仅处理当前筛选视图中勾选的曲目。"""
+        with offscreen_tk() as root:
+            win = app_mod.MainWindow(root, auto_scan=False)
+            t1 = LibraryTrack(path='D:/Music/2002.flac', filename='2002.flac', folder='D:/Music', title='2002年的第一场雪', artist='刀郎')
+            t2 = LibraryTrack(path='D:/Music/teng.flac', filename='teng.flac', folder='D:/Music', title='小城故事', artist='邓丽君')
+            win.tracks = [t1, t2]
+            win.visible_tracks = [t1, t2]
+            win._has_scanned = True
+            # 初始全量勾选（模拟扫描完成后两首均需修复）
+            win.checked_paths = {t1.path, t2.path}
+
+            # 1. 处于搜索筛选状态 (关键字 '2002')，视图仅见 t1
+            win.var_search.set('2002')
+            win.visible_tracks = [t1]
+
+            # 验证提取操作目标仅返回当前可见且勾选的 t1，完全隔离 t2
+            targets = win._get_target_tracks_for_action('修复')
+            self.assertEqual(targets, [t1])
+
+            # 验证点击一键修复触发的 _start_fix 仅接收 t1
+            with patch.object(win, '_start_fix') as mock_fix:
+                win.btn_one_click.invoke()
+                mock_fix.assert_called_once()
+                self.assertEqual(mock_fix.call_args[0][0], [t1])
+
+            # 2. 如果在筛选状态下取消勾选 t1，点击修复应被安全拦截并提示（不误伤后台 t2）
+            win.checked_paths.discard(t1.path)
+            with patch('ui.main_window.messagebox.showinfo') as mock_info, \
+                 patch.object(win, '_start_fix') as mock_fix:
+                win.btn_one_click.invoke()
+                mock_fix.assert_not_called()
+                mock_info.assert_called_once()
+                self.assertIn('视图外另有 1 首', mock_info.call_args[0][1])
+
+            # 3. 清空搜索关键字后，恢复全量勾选处理
+            win.var_search.set('')
+            win.checked_paths = {t1.path, t2.path}
+            targets_all = win._get_target_tracks_for_action('修复')
+            self.assertEqual(len(targets_all), 2)
+
+
+

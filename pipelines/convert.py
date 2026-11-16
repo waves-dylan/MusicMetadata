@@ -6,14 +6,14 @@ import os
 
 from services.art import convert_track_format
 from core.constants import CONVERT_TARGET_FORMATS, STATUS_ERROR
-from core.models import FoobarEnv, LibraryTrack
-from pipelines.executor import _run_pool_cancellable, _sync_foobar_targets, resolve_hook
+from core.models import LibraryTrack, PlayerEnv
+from pipelines.executor import _run_pool_cancellable, _sync_player_targets, resolve_hook
 from pipelines.options import ConvertOptions
 from tag_io import find_ffmpeg
 
 
 def execute_convert(
-    env: FoobarEnv, targets: list[LibraryTrack], options: ConvertOptions,
+    env: PlayerEnv, targets: list[LibraryTrack], options: ConvertOptions,
     progress_cb=None, row_cb=None, log_cb=None, is_cancelled_cb=None,
 ) -> dict:
     """批量转换音频格式（通过 ffmpeg 保留元数据与封面/歌词并原子替换）。"""
@@ -110,7 +110,7 @@ def execute_convert(
 
     touched, reloaded = (0, False)
     if not options.dry_run and options.enable_sync and output_paths and not cancelled:
-        touched, reloaded = _sync_foobar_targets(env, output_paths, None, emit_log, log_noun='转换后文件')
+        touched, reloaded = _sync_player_targets(env, output_paths, None, emit_log, log_noun='转换后文件')
 
     return {
         'cancelled': cancelled, 'dry_run': options.dry_run,

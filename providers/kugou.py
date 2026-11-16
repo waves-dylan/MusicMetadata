@@ -101,33 +101,71 @@ class KugouProvider(MusicProvider):
             return [x for x in info if isinstance(x, dict)]
         return cached_song_search('kugou_song', 'default', term, _fetch)
 
+    def search_artist_candidates(self, artist_name: str, *, track_hint: str = '') -> list[dict]:
+        name = str(artist_name or '').strip()
+        if not name:
+            return []
+
+        try:
+            d = http_get_json('http://mobilecdn.kugou.com/api/v3/search/singer', params={'keyword': name, 'pagesize': 5})
+            singers = (d or {}).get('data') if isinstance(d, dict) else []
+        except Exception:
+            return []
+        if not isinstance(singers, list):
+            return []
+
+        results: list[dict] = []
+        seen_pics: set[str] = set()
+        for s in singers:
+            if not isinstance(s, dict):
+                continue
+            sid = s.get('singerid')
+            if not sid:
+                continue
+            sname = str(s.get('singername') or '').strip() or name
+            fans = s.get('fanscount') or 0
+            album_num = s.get('albumcount') or 0
+            clues = f'酷狗认证 · {fans} 粉丝' if fans else (f'专辑 {album_num} 张' if album_num else '官方歌手')
+
+            try:
+                info_d = http_get_json('http://mobilecdn.kugou.com/api/v3/singer/info', params={'singerid': sid})
+                imgurl = str(((info_d or {}).get('data') or {}).get('imgurl') or '').strip()
+            except Exception:
+                imgurl = ''
+            if not imgurl or not imgurl.startswith('http'):
+                continue
+            pic_url = imgurl.replace('{size}', '1000')
+            if pic_url in seen_pics:
+                continue
+            seen_pics.add(pic_url)
+            results.append({
+                'source': self.label,
+                'platform': self.id,
+                'artist_name': sname,
+                'pic_url': pic_url,
+                'aspect_type': 'square',
+                'resolution': '1000×1000 方图',
+                'width': 1000,
+                'height': 1000,
+                'clues': clues,
+                'raw_meta': s,
+            })
+        return results
+
     def search_artist(self, artist_name: str) -> str:
         name = str(artist_name or '').strip()
         if not name:
             return ''
 
         def _fetch() -> str:
-            d = http_get_json('http://mobilecdn.kugou.com/api/v3/search/singer', params={'keyword': name, 'pagesize': 5})
-            singers = (d or {}).get('data') if isinstance(d, dict) else []
-            if not isinstance(singers, list) or not singers:
+            cands = self.search_artist_candidates(name)
+            if not cands:
                 return ''
             sk = norm_core(name)
-            sid = None
-            for s in singers:
-                if not isinstance(s, dict):
-                    continue
-                if sk and norm_core(s.get('singername') or '') == sk:
-                    sid = s.get('singerid')
-                    break
-            if sid is None and isinstance(singers[0], dict):
-                sid = singers[0].get('singerid')
-            if not sid:
-                return ''
-            info_d = http_get_json('http://mobilecdn.kugou.com/api/v3/singer/info', params={'singerid': sid})
-            imgurl = str(((info_d or {}).get('data') or {}).get('imgurl') or '').strip()
-            if imgurl:
-                return imgurl.replace('{size}', '1000')
-            return ''
+            for c in cands:
+                if sk and norm_core(c['artist_name']) == sk:
+                    return c['pic_url']
+            return cands[0]['pic_url']
 
         return cached_artist_url('kugou', name, _fetch)
 

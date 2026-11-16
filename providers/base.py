@@ -22,6 +22,7 @@ from datetime import datetime, timedelta, timezone
 from tag_io import merge_lyrics
 
 from core.models import TrackMatch
+from core.zh_norm import to_simplified
 from infra.net import (
     ALBUM_CACHE,
     ALBUM_META_CACHE,
@@ -59,9 +60,28 @@ from infra.net import (
 CN_TZ = timezone(timedelta(hours=8))
 
 _BRACKET_RE = re.compile(r'[\(（\[【].*?[\)）\]】]')
-_LRC_TS_RE = re.compile(r'^(?:\[\d{1,3}:\d{2}(?:[.:]\d{1,3})?\])+\s*')
+_LRC_TS_RE = re.compile(r'^(?:\[\d{1,3}:\d{2}[^\]]*\]\s*)+')
 _VA_ARTISTS = {'群星', 'variousartists', 'various', 'va', 'soundtrack', 'originalsoundtrack', 'ost'}
-_COMPOSER_ROLES = {'作曲', '曲', '谱曲', 'composer', 'music', 'musicby', 'composedby'}
+_COMPOSER_ROLES = {'作曲', '曲', '谱曲', 'composer', 'music', 'musicby', 'composedby', 'composition'}
+_LYRICIST_ROLES = {'作词', '词', '填词', 'lyricist', 'lyrics', 'lyricsby', 'words', 'wordsby'}
+_ARRANGER_ROLES = {'编曲', 'arranger', 'arrangement', 'arrangedby', 'orchestration', 'orchestratedby', '弦乐编曲', '管弦乐编曲'}
+_JOINT_WORDS_MUSIC_ROLES = {'词曲', '词/曲', '作词作曲', '作词/作曲', 'wordsandmusic', 'wordsmusic', 'writtenandcomposedby'}
+
+_NON_COMPOSER_EXCLUDE = (
+    '编曲', 'arrang', '作词', 'lyric', '制作', 'produc',
+    '录音', '混音', '母带', 'master', 'vocal', '演唱', '原唱',
+    '演奏', 'rendition', '文案', '监制', '统筹', '企划', '出品', '发行', '助理', 'assistant',
+)
+_NON_LYRICIST_EXCLUDE = (
+    '编曲', 'arrang', '作曲', '谱曲', 'composer', '制作', 'produc',
+    '录音', '混音', '母带', 'master', 'vocal', '演唱', '原唱',
+    '演奏', 'rendition', '文案', '监制', '统筹', '企划', '出品', '发行', '助理', 'assistant',
+)
+_NON_ARRANGER_EXCLUDE = (
+    '作词', 'lyric', '作曲', '谱曲', 'composer',
+    '录音', '混音', '母带', 'master', 'vocal', '演唱', '原唱',
+    '演奏', 'rendition', '文案', '监制', '统筹', '企划', '出品', '发行', '助理', 'assistant',
+)
 _INVALID_CREDITS = {'', '-', '/', '无', '暂无', '纯音乐', 'none', 'null', 'n/a'}
 
 
@@ -80,11 +100,13 @@ def to_seconds(value) -> float:
 
 
 def norm_full(v: str) -> str:
-    return re.sub(r'[^\w]+', '', unicodedata.normalize('NFKC', html.unescape(str(v or ''))).lower())
+    s = unicodedata.normalize('NFKC', html.unescape(str(v or ''))).lower()
+    return re.sub(r'[^\w]+', '', to_simplified(s))
 
 
 def norm_core(v: str) -> str:
-    return re.sub(r'[^\w]+', '', _BRACKET_RE.sub('', unicodedata.normalize('NFKC', html.unescape(str(v or ''))).lower()))
+    s = _BRACKET_RE.sub('', unicodedata.normalize('NFKC', html.unescape(str(v or ''))).lower())
+    return re.sub(r'[^\w]+', '', to_simplified(s))
 
 
 def norm_id(v: str) -> str:
@@ -205,28 +227,97 @@ def get_album_date(platform: str, album_id: str) -> str:
     return get_album_meta(platform, album_id).get('release_date', '')
 
 
-def parse_lyric_credits(lrc_text: str) -> str:
-    """从歌词头部制作人员行提取作曲者 (composer)。"""
+def parse_all_lyric_credits(lrc_text: str) -> dict[str, str]:
+    """从歌词头部制作人员行全面提取 作曲 (composer)、作词 (lyricist) 与 编曲 (arranger)。
+    兼容普通文本、JSON/YRC逐字歌词、多作者斜杠/逗号切分与中英双语标签。
+    """
     composers: list[str] = []
-    for raw_line in str(lrc_text or '').replace('\r\n', '\n').splitlines()[:45]:
+    lyricists: list[str] = []
+    arrangers: list[str] = []
+
+    for raw_line in str(lrc_text or '').replace('\r\n', '\n').splitlines()[:55]:
         line = _LRC_TS_RE.sub('', raw_line).strip()
+        if not line:
+            continue
+        if line.startswith('{') and '"c":' in line and '"tx":' in line:
+            try:
+                data = json.loads(line)
+                parts = [c.get('tx', '') for c in data.get('c', []) if isinstance(c, dict)]
+                line = ''.join(parts).strip()
+            except Exception:
+                pass
+        line = _LRC_TS_RE.sub('', line).strip()
         if not line or (':' not in line and '：' not in line):
             continue
         sep = '：' if ('：' in line and (':' not in line or line.index('：') < line.index(':'))) else ':'
         role_raw, val_raw = line.split(sep, 1)
         role_clean = role_raw.strip()
-        role_key = re.sub(r'[\s/\-_]+', '', role_clean).lower()
+        role_key = re.sub(r'[\s/\-_()（）\[\]]+', '', role_clean).lower()
         val_clean = val_raw.strip()
-        if not role_key or len(role_clean) > 20 or val_clean.lower() in _INVALID_CREDITS:
+        if not role_key or len(role_clean) > 35 or val_clean.lower() in _INVALID_CREDITS:
             continue
-        names = [p.strip() for p in re.split(r'\s*[/、,;]\s*', val_clean) if p.strip() and p.strip().lower() not in _INVALID_CREDITS]
-        if not names:
+
+        raw_names = [p.strip() for p in re.split(r'\s*[/、,;&；]\s*', val_clean) if p.strip() and p.strip().lower() not in _INVALID_CREDITS]
+        if not raw_names:
             continue
-        if role_key in _COMPOSER_ROLES:
-            for nm in names:
+
+        # 1. 词曲连体标识 (如 词曲 : 周杰伦 / Words & Music)
+        if any(jr in role_key for jr in _JOINT_WORDS_MUSIC_ROLES) or role_key in ('词曲', '作词作曲'):
+            for nm in raw_names:
                 if nm not in composers:
                     composers.append(nm)
-    return ', '.join(composers)
+                if nm not in lyricists:
+                    lyricists.append(nm)
+            continue
+
+        # 2. 编曲 (Arranger)
+        if not any(ex in role_key for ex in _NON_ARRANGER_EXCLUDE):
+            is_arr = (
+                '编曲' in role_key or 'arrang' in role_key or 'orchestr' in role_key
+                or role_key in _ARRANGER_ROLES
+            )
+            if is_arr:
+                for nm in raw_names:
+                    if nm not in arrangers:
+                        arrangers.append(nm)
+                continue
+
+        # 3. 作词 (Lyricist)
+        if not any(ex in role_key for ex in _NON_LYRICIST_EXCLUDE):
+            is_lyr = (
+                '作词' in role_key or '填词' in role_key
+                or 'lyric' in role_key or 'words' in role_key
+                or role_key in _LYRICIST_ROLES
+            )
+            if is_lyr:
+                for nm in raw_names:
+                    if nm not in lyricists:
+                        lyricists.append(nm)
+                continue
+
+        # 4. 作曲 (Composer)
+        if not any(ex in role_key for ex in _NON_COMPOSER_EXCLUDE):
+            is_comp = (
+                '作曲' in role_key or '谱曲' in role_key
+                or 'composer' in role_key or 'composition' in role_key
+                or 'composedby' in role_key or role_key in _COMPOSER_ROLES
+            )
+            if is_comp:
+                for nm in raw_names:
+                    if nm not in composers:
+                        composers.append(nm)
+                continue
+
+    return {
+        'composer': ', '.join(composers),
+        'lyricist': ', '.join(lyricists),
+        'arranger': ', '.join(arrangers),
+    }
+
+
+def parse_lyric_credits(lrc_text: str) -> str:
+    """从歌词头部制作人员行提取作曲者 (composer)，兼容普通文本、JSON/YRC逐字歌词与中英双语标签。"""
+    return parse_all_lyric_credits(lrc_text).get('composer', '')
 
 
 def build_tracks(items: list[dict]) -> list[dict]:

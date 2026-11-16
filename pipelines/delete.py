@@ -12,8 +12,8 @@ from services.art import (
     inspect_deletable_fields,
 )
 from core.constants import FIELD_LABELS, STATUS_ERROR
-from core.models import FoobarEnv, LibraryTrack
-from pipelines.executor import _run_pool_cancellable, _sync_foobar_targets
+from core.models import LibraryTrack, PlayerEnv
+from pipelines.executor import _run_pool_cancellable, _sync_player_targets
 from pipelines.options import DeleteOptions
 from tag_io import read_audio_info
 
@@ -37,7 +37,7 @@ def _count_deletable_targets(targets: list[LibraryTrack]) -> tuple[dict[str, int
             counts['cover'] += 1
         if tr.has_artist_art:
             counts['artist_cover'] += 1
-        for f in ('title', 'artist', 'albumartist', 'album', 'date', 'composer', 'performer', 'genre', 'comment'):
+        for f in ('title', 'artist', 'albumartist', 'album', 'date', 'composer', 'lyricist', 'arranger', 'performer', 'genre', 'comment'):
             if (getattr(tr, f, '') or '').strip():
                 counts[f] += 1
         if (tr.disk_tracknumber or '').strip() or tr.disk_track_int is not None:
@@ -50,10 +50,10 @@ def _count_deletable_targets(targets: list[LibraryTrack]) -> tuple[dict[str, int
 
 
 def execute_deletions(
-    env: FoobarEnv, targets: list[LibraryTrack], options: DeleteOptions,
+    env: PlayerEnv, targets: list[LibraryTrack], options: DeleteOptions,
     progress_cb=None, row_cb=None, log_cb=None, is_cancelled_cb=None,
 ) -> dict:
-    """批量删除指定曲目中选定元数据类别的条目（支持预演、163 key 保护、外置封面清理与 foobar 刷新）。"""
+    """批量删除指定曲目中选定元数据类别的条目（支持预演、163 key 保护、外置封面清理与播放器缓存刷新）。"""
     fields = [f for f in DELETABLE_FIELDS if f in options.fields]
     total = len(targets)
     cancelled = False
@@ -145,7 +145,7 @@ def execute_deletions(
                 field_counts[f] = field_counts.get(f, 0) + 1
             if options.enable_sync:
                 synced_paths.append(tr.path)
-                foobar_mtimes[os.path.normcase(os.path.abspath(tr.path))] = max(tr.foobar_mtime, tr.disk_mtime)
+                foobar_mtimes[os.path.normcase(os.path.abspath(tr.path))] = max(tr.cached_mtime, tr.disk_mtime)
             emit_row(tr.path, {
                 'status_text': '已删除', 'source_note': msg, 'color': 'ok',
                 'deleted_fields': list(act_del), 'new_info': new_info or read_audio_info(tr.path), 'synced': options.enable_sync,
@@ -219,7 +219,7 @@ def execute_deletions(
 
     touched, reloaded = (0, False)
     if not options.dry_run and synced_paths and not cancelled:
-        touched, reloaded = _sync_foobar_targets(env, synced_paths, foobar_mtimes, emit_log)
+        touched, reloaded = _sync_player_targets(env, synced_paths, foobar_mtimes, emit_log)
 
     return {
         'cancelled': cancelled, 'dry_run': options.dry_run,

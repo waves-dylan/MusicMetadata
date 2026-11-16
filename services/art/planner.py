@@ -37,7 +37,11 @@ _DATE_DIR_PREFIX_RE = re.compile(r'^\d{2,4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2}\s*')
 _TRAILING_ID_RE = re.compile(r'\s*-\s*[0-9A-Za-z]{6,}$')
 
 
-def plan_picture_fix(pics: list[dict], album_jpeg: bytes | None) -> tuple[bool, list[str], bytes | None, str]:
+def plan_picture_fix(
+    pics: list[dict],
+    album_jpeg: bytes | None,
+    artist_jpeg: bytes | None = None,
+) -> tuple[bool, list[str], bytes | None, str]:
     """只读分析曲目是否包含有效的内嵌封面图片（Type 3），以及是否需要规范化或补齐。"""
     reasons: list[str] = []
     decodable: list[tuple[dict, tuple[str, int, int]]] = []
@@ -47,15 +51,51 @@ def plan_picture_fix(pics: list[dict], album_jpeg: bytes | None) -> tuple[bool, 
             decodable.append((p, info))
         else:
             reasons.append('undecodable')
-    fronts = [(p, i) for p, i in decodable if p['type'] == COVER_FRONT_TYPE]
-    if not decodable:
-        return (False, ['no-cover-source'], None, 'image/jpeg') if album_jpeg is None else (True, ['no-cover'], album_jpeg, 'image/jpeg')
-    if not fronts:
-        reasons.append('no-front(type!=3)')
-    if len(fronts) > 1:
-        reasons.append(f'multi-front({len(fronts)})')
 
-    base, (fmt, w, h) = fronts[0] if fronts else decodable[0]
+    # 收集已知的艺术家写真数据（外部 artist_jpeg 与曲目内嵌的 Type 8/7 艺人图）
+    known_artist_blobs: list[bytes] = []
+    if artist_jpeg:
+        known_artist_blobs.append(artist_jpeg)
+    for p, _ in decodable:
+        if p['type'] in (ARTIST_PIC_TYPE, 7):
+            known_artist_blobs.append(p['data'])
+
+    def _is_art_dup(data: bytes | None) -> bool:
+        if not data or not known_artist_blobs:
+            return False
+        return any(data == a or same_art(data, a) for a in known_artist_blobs)
+
+    # 筛选出真正的正面封面（Type 3）
+    valid_fronts: list[tuple[dict, tuple[str, int, int]]] = []
+    for p, i in decodable:
+        if p['type'] == COVER_FRONT_TYPE:
+            # 仅当已明确提供不同的独立专辑代表封面，且当前内嵌 Type 3 确实与艺术家写真重复时，才视为需替换
+            if album_jpeg is not None and not _is_art_dup(album_jpeg) and _is_art_dup(p['data']):
+                reasons.append('front-is-artist-dup')
+            else:
+                valid_fronts.append((p, i))
+
+    if not valid_fronts:
+        # 若曲目缺少有效正面封面：
+        # 如果专辑代表封面有效可用（且并非艺术家写真），则补齐专辑封面
+        if album_jpeg is not None and not _is_art_dup(album_jpeg):
+            return (True, ['no-cover'] + reasons, album_jpeg, 'image/jpeg')
+        # 如果没有合法的 album_jpeg，检查是否有非艺术家图的未分类图片（如 Type 0 Other）可尝试纠正类型
+        untyped_cands = [
+            (p, i) for p, i in decodable
+            if p['type'] == 0 and not _is_art_dup(p['data'])
+        ]
+        if not untyped_cands:
+            reasons.append('no-cover-source')
+            return (False, reasons, None, 'image/jpeg')
+        # 存在 Type 0 的未知封面图片，允许修正为 Type 3
+        base, (fmt, w, h) = untyped_cands[0]
+        reasons.append(f"type-fixed({base['type']}->3)")
+    else:
+        if len(valid_fronts) > 1:
+            reasons.append(f'multi-front({len(valid_fronts)})')
+        base, (fmt, w, h) = valid_fronts[0]
+
     data = base['data']
     mime = 'image/png' if fmt == 'PNG' else ('image/jpeg' if fmt in ('JPEG', 'MPO') else f'image/{fmt.lower()}')
     if (base['mime'] or '').lower() != mime:
@@ -67,8 +107,6 @@ def plan_picture_fix(pics: list[dict], album_jpeg: bytes | None) -> tuple[bool, 
             data, mime = shrunk, 'image/jpeg'
     if not reasons:
         return False, [], None, 'image/jpeg'
-    if base['type'] != COVER_FRONT_TYPE:
-        reasons.append(f"type-fixed({base['type']}->3)")
     return True, reasons, data, mime
 
 
@@ -115,6 +153,11 @@ def _pick_folder_image(folder: str) -> bytes | None:
         p = os.path.join(folder, name)
         if not os.path.isfile(p):
             continue
+        stem = os.path.splitext(name)[0].lower()
+        if stem in ARTIST_NAMES or any(a in stem for a in ('artist', 'singer', 'author', 'band', 'avatar')):
+            continue
+        if any(b in stem for b in ('back', 'rear', 'disc', 'tray', 'inlay', 'booklet', 'scans')):
+            continue
         try:
             with open(p, 'rb') as fp:
                 data = fp.read()
@@ -123,7 +166,7 @@ def _pick_folder_image(folder: str) -> bytes | None:
         info = sniff_image(data)
         if not info:
             continue
-        rank = (3 if os.path.splitext(name)[0].lower() in COVER_NAMES else 1, info[1] * info[2])
+        rank = (3 if stem in COVER_NAMES else 1, info[1] * info[2])
         if best is None or rank > best[0]:
             best = (rank, data)
     return best[1] if best else None
@@ -218,10 +261,20 @@ def analyze_folder_art_and_tags(
     pre_read_infos: dict[str, dict] | None = None,
 ) -> FolderArtPlan:
     """只读分析目录外置封面、曲目内嵌封面及缺失分组标签。"""
+    # 智能感知现存封面文件：优先尊重已有的 cover.jpg / folder.jpg / front.jpg，实现“就地随俗”
+    active_cover_name = 'cover.jpg'
+    active_backup_name = 'disabled-cover.jpg.bak'
+    for cand_name in ('cover.jpg', 'folder.jpg', 'cover.png', 'folder.png', 'front.jpg'):
+        cand_p = os.path.join(folder, cand_name)
+        if os.path.isfile(cand_p):
+            active_cover_name = cand_name
+            active_backup_name = f'disabled-{os.path.splitext(cand_name)[0]}.jpg.bak'
+            break
+
     plan = FolderArtPlan(
         folder=folder,
-        cover_path=os.path.join(folder, 'cover.jpg'),
-        backup_path=os.path.join(folder, 'disabled-cover.jpg.bak'),
+        cover_path=os.path.join(folder, active_cover_name),
+        backup_path=os.path.join(folder, active_backup_name),
         artist_cover_path=os.path.join(folder, 'artist.jpg'),
         backup_artist_path=os.path.join(folder, 'disabled-artist.jpg.bak'),
     )
@@ -251,73 +304,20 @@ def analyze_folder_art_and_tags(
 
     folder_album = _DATE_DIR_PREFIX_RE.sub('', os.path.basename(folder)).strip()
     groups: OrderedDict[str, list[dict]] = OrderedDict()
+    alb_key_map: dict[str, str] = {}
     for rec in records:
-        groups.setdefault((rec['info'].get('album') or '').strip() or folder_album, []).append(rec)
+        raw_alb = (rec['info'].get('album') or '').strip() or folder_album
+        norm_k = raw_alb.lower()
+        if norm_k not in alb_key_map:
+            alb_key_map[norm_k] = raw_alb
+        canon_alb = alb_key_map[norm_k]
+        groups.setdefault(canon_alb, []).append(rec)
     plan.album_count = len(groups)
     single = len(groups) == 1
 
-    album_targets: dict[str, bytes | None] = {}
-    album_hashes: dict[str, int | None] = {}
-    for alb_key, grp_recs in groups.items():
-        votes: OrderedDict[str, list] = OrderedDict()
-        for rec in grp_recs:
-            for pic in rec['pics']:
-                pinfo = sniff_image(pic['data'])
-                if not pinfo:
-                    continue
-                h = hashlib.md5(pic['data']).hexdigest()
-                front = 1 if pic['type'] == COVER_FRONT_TYPE else 0
-                if h not in votes:
-                    votes[h] = [front, 1, pinfo[1] * pinfo[2], pic['data']]
-                else:
-                    votes[h][0] = max(votes[h][0], front)
-                    votes[h][1] += 1
-        jpeg = (
-            normalize_jpeg(sorted(votes.values(), key=lambda x: (x[0], x[1], x[2]), reverse=True)[0][3], MAX_SIDE)
-            if votes else None
-        )
-        album_targets[alb_key] = jpeg
-        try:
-            album_hashes[alb_key] = ahash(jpeg) if jpeg else None
-        except Exception:
-            album_hashes[alb_key] = None
-
-    if single:
-        only_key = next(iter(groups))
-        if album_targets.get(only_key) is None:
-            raw_dir = _pick_folder_image(folder)
-            if raw_dir:
-                album_targets[only_key] = normalize_jpeg(raw_dir, MAX_SIDE)
-                try:
-                    album_hashes[only_key] = ahash(album_targets[only_key]) if album_targets[only_key] else None
-                except Exception:
-                    album_hashes[only_key] = None
-        cover_jpeg = album_targets.get(only_key)
-        plan.cover_jpeg = cover_jpeg
-        if cover_jpeg is None:
-            plan.cover_action = 'nodata'
-        elif not os.path.exists(plan.cover_path):
-            plan.cover_action, plan.detail = 'create', '单专辑目录缺少外置 cover.jpg'
-        else:
-            try:
-                with open(plan.cover_path, 'rb') as fp:
-                    old = fp.read()
-                if old == cover_jpeg or same_art(old, cover_jpeg):
-                    plan.cover_action = 'ok'
-                else:
-                    plan.cover_action, plan.detail = 'rewrite', '外置 cover.jpg 与代表封面不一致，需重写'
-            except OSError:
-                plan.cover_action, plan.detail = 'rewrite', '外置 cover.jpg 读取异常，需重写'
-    else:
-        names = '、'.join(k or '(空专辑)' for k in groups)
-        if os.path.exists(plan.cover_path):
-            plan.cover_action, plan.detail = 'remove', f'目录含 {len(groups)} 张专辑（{names}），需撤回误放的 cover.jpg'
-        else:
-            plan.cover_action, plan.detail = 'mixed-skip', f'目录含 {len(groups)} 张专辑（{names}），跳过外置封面'
-
     folder_maj = _compute_majority_tags(records) if single else None
 
-    # 统计目录内的艺术家图片（内嵌或外置）
+    # 统计目录内的艺术家图片（内嵌或外置），优先于封面规划以便排查艺术家图误套用
     artist_votes: OrderedDict[str, list] = OrderedDict()
     for rec in records:
         for pic in rec['pics']:
@@ -346,6 +346,12 @@ def analyze_folder_art_and_tags(
         for rec in records if (rec['info'].get('albumartist') or rec['info'].get('artist') or '').strip()
     }
     same_artist_in_folder = len(distinct_artists) <= 1
+    folder_is_artist = bool(
+        folder_album and (
+            folder_album.lower() in distinct_artists
+            or (folder_maj and folder_album.lower() in (folder_maj.get('artist', '').lower(), folder_maj.get('albumartist', '').lower()))
+        )
+    )
 
     if single or same_artist_in_folder:
         plan.artist_cover_jpeg = best_artist_jpeg
@@ -369,14 +375,120 @@ def analyze_folder_art_and_tags(
         else:
             plan.artist_cover_action, plan.artist_detail = 'mixed-skip', '目录含多位不同艺术家，跳过外置 artist.jpg'
 
+    album_targets: dict[str, bytes | None] = {}
+    album_hashes: dict[str, int | None] = {}
+    for alb_key, grp_recs in groups.items():
+        votes: OrderedDict[str, list] = OrderedDict()
+        for rec in grp_recs:
+            for pic in rec['pics']:
+                pinfo = sniff_image(pic['data'])
+                if not pinfo:
+                    continue
+                # 严禁艺术家/表演者/乐队图片参与专辑封面投票
+                if pic['type'] in (ARTIST_PIC_TYPE, 7, 8, 9, 10, 11, 12, 19):
+                    continue
+                # 仅允许正面封面(Type 3)或未定义类型(Type 0)参与封面投票
+                if pic['type'] not in (COVER_FRONT_TYPE, 0):
+                    continue
+                # 未定义类型(Type 0)若与已知艺术家写真相同或高度相似，严禁参与专辑封面投票（防误套用）
+                if pic['type'] == 0 and best_artist_jpeg and (pic['data'] == best_artist_jpeg or same_art(pic['data'], best_artist_jpeg)):
+                    continue
+                h = hashlib.md5(pic['data']).hexdigest()
+                front = 1 if pic['type'] == COVER_FRONT_TYPE else 0
+                if h not in votes:
+                    votes[h] = [front, 1, pinfo[1] * pinfo[2], pic['data']]
+                else:
+                    votes[h][0] = max(votes[h][0], front)
+                    votes[h][1] += 1
+        jpeg = (
+            normalize_jpeg(sorted(votes.values(), key=lambda x: (x[0], x[1], x[2]), reverse=True)[0][3], MAX_SIDE)
+            if votes else None
+        )
+        album_targets[alb_key] = jpeg
+        try:
+            album_hashes[alb_key] = ahash(jpeg) if jpeg else None
+        except Exception:
+            album_hashes[alb_key] = None
+
+    if single:
+        only_key = next(iter(groups))
+        if album_targets.get(only_key) is None:
+            raw_dir = _pick_folder_image(folder)
+            if raw_dir:
+                # 核心防呆：如果外置图片与已知艺术家写真相同，绝不能选为专辑封面
+                if best_artist_jpeg and (raw_dir == best_artist_jpeg or same_art(raw_dir, best_artist_jpeg)):
+                    raw_dir = None
+                if raw_dir:
+                    album_targets[only_key] = normalize_jpeg(raw_dir, MAX_SIDE)
+                    try:
+                        album_hashes[only_key] = ahash(album_targets[only_key]) if album_targets[only_key] else None
+                    except Exception:
+                        album_hashes[only_key] = None
+        cover_jpeg = album_targets.get(only_key)
+        plan.cover_jpeg = cover_jpeg
+        c_name = os.path.basename(plan.cover_path)
+        if cover_jpeg is None:
+            plan.cover_action = 'nodata'
+        elif not os.path.exists(plan.cover_path):
+            plan.cover_action, plan.detail = 'create', f'单专辑目录缺少外置 {c_name}'
+        else:
+            try:
+                with open(plan.cover_path, 'rb') as fp:
+                    old = fp.read()
+                if old == cover_jpeg or same_art(old, cover_jpeg):
+                    plan.cover_action = 'ok'
+                else:
+                    plan.cover_action, plan.detail = 'rewrite', f'外置 {c_name} 与代表封面不一致，需重写'
+            except OSError:
+                plan.cover_action, plan.detail = 'rewrite', f'外置 {c_name} 读取异常，需重写'
+    else:
+        names = '、'.join(k or '(空专辑)' for k in groups)
+        c_name = os.path.basename(plan.cover_path)
+        if os.path.exists(plan.cover_path):
+            plan.cover_action, plan.detail = 'remove', f'目录含 {len(groups)} 张专辑（{names}），需撤回误放的 {c_name}'
+        else:
+            plan.cover_action, plan.detail = 'mixed-skip', f'目录含 {len(groups)} 张专辑（{names}），跳过外置封面'
+
+    # 交叉检查：若外置 cover.jpg 与 artist.jpg 重复（误套用艺术家图）且曲目并无真正独立内嵌封面
+    has_genuine_embedded_front = any(
+        any(
+            p['type'] == COVER_FRONT_TYPE
+            for p in rec['pics']
+        )
+        for rec in records
+    )
+    if not has_genuine_embedded_front and best_artist_jpeg is not None:
+        raw_cov_file_data = None
+        if os.path.exists(plan.cover_path):
+            try:
+                with open(plan.cover_path, 'rb') as fp:
+                    raw_cov_file_data = fp.read()
+            except OSError:
+                pass
+        is_cov_same_as_art = False
+        if raw_cov_file_data and (raw_cov_file_data == best_artist_jpeg or same_art(raw_cov_file_data, best_artist_jpeg)):
+            is_cov_same_as_art = True
+        elif plan.cover_jpeg and (plan.cover_jpeg == best_artist_jpeg or same_art(plan.cover_jpeg, best_artist_jpeg)):
+            is_cov_same_as_art = True
+
+        if is_cov_same_as_art:
+            plan.cover_jpeg = None
+            if single:
+                only_alb_key = next(iter(groups))
+                album_targets[only_alb_key] = None
+                album_hashes[only_alb_key] = None
+            plan.cover_action = 'nodata'
+            c_name = os.path.basename(plan.cover_path)
+            plan.detail = f'外置 {c_name} 与 artist.jpg 重复（误套用艺术家图），待联网重写'
+
     for alb_key, grp_recs in groups.items():
         tgt_jpeg, tgt_hash = album_targets.get(alb_key), album_hashes.get(alb_key)
         grp_maj = folder_maj if single else _compute_majority_tags(grp_recs)
         for rec in grp_recs:
             info, container, pics = rec['info'], rec['container'], rec['pics']
-            need_pic, reasons, tgt_bytes, tgt_mime = plan_picture_fix(pics, tgt_jpeg)
+            need_pic, reasons, tgt_bytes, tgt_mime = plan_picture_fix(pics, tgt_jpeg, artist_jpeg=best_artist_jpeg)
             if not need_pic and tgt_jpeg and tgt_hash is not None and 'no-cover-source' not in reasons:
-                fronts = [pc for pc in pics if pc['type'] == COVER_FRONT_TYPE] or pics
+                fronts = [pc for pc in pics if pc['type'] == COVER_FRONT_TYPE]
                 try:
                     if fronts and ham(ahash(fronts[0]['data']), tgt_hash) > SAME_ART_DISTANCE:
                         need_pic, reasons, tgt_bytes, tgt_mime = True, ['art-mismatch(与专辑代表封面不同)'], tgt_jpeg, 'image/jpeg'
@@ -386,7 +498,7 @@ def analyze_folder_art_and_tags(
                 need_pic = False
                 reasons.append(f'{container}暂不支持写封面')
 
-            cov_status = ('待修:' + ','.join(reasons)) if need_pic else ('缺封面(无可用图源)' if 'no-cover-source' in reasons else '正常')
+            cov_status = ('待修:' + ','.join(reasons)) if need_pic else ('缺封面(手动挑选)' if 'no-cover-source' in reasons else '正常')
 
             need_art_pic, art_reasons, tgt_art_bytes, tgt_art_mime = plan_artist_picture_fix(pics, plan.artist_cover_jpeg)
             if need_art_pic and container not in SUPPORTS_ARTIST_WRITE:
@@ -399,7 +511,7 @@ def analyze_folder_art_and_tags(
             if single or (info.get('album') or '').strip():
                 for f in ('album', 'albumartist', 'date', 'genre'):
                     if not (info.get(f) or '').strip():
-                        val = grp_maj.get(f, '') or (folder_album if (f == 'album' and single) else '')
+                        val = grp_maj.get(f, '') or (folder_album if (f == 'album' and single and not folder_is_artist) else '')
                         if val:
                             tag_updates[f] = val
             elif not (info.get('albumartist') or '').strip():
@@ -436,22 +548,24 @@ def analyze_folder_art_and_tags(
 
 
 def apply_folder_cover_file(plan: FolderArtPlan) -> tuple[bool, str]:
-    """为单专辑目录写入或重写外置 cover.jpg（多专辑混放目录撤回备份）。"""
+    """为单专辑目录写入或重写外置封面（优先 cover.jpg，就地随俗支持 folder.jpg；多专辑混放目录撤回备份）。"""
+    c_name = os.path.basename(plan.cover_path) or 'cover.jpg'
+    b_name = os.path.basename(plan.backup_path) or 'disabled-cover.jpg.bak'
     if plan.cover_action in ('create', 'rewrite'):
         if not plan.cover_jpeg:
             return False, '无可用封面数据'
         try:
             with open(plan.cover_path, 'wb') as fp:
                 fp.write(plan.cover_jpeg)
-            return True, '已生成 cover.jpg' if plan.cover_action == 'create' else '已重写 cover.jpg'
+            return True, f'已生成 {c_name}' if plan.cover_action == 'create' else f'已重写 {c_name}'
         except OSError as err:
-            return False, f'写入 cover.jpg 失败: {err}'
+            return False, f'写入 {c_name} 失败: {err}'
     if plan.cover_action == 'remove' and os.path.exists(plan.cover_path):
         try:
             os.replace(plan.cover_path, plan.backup_path)
-            return True, '已撤回多专辑目录 cover.jpg -> disabled-cover.jpg.bak'
+            return True, f'已撤回多专辑目录 {c_name} -> {b_name}'
         except OSError as err:
-            return False, f'撤回 cover.jpg 失败: {err}'
+            return False, f'撤回 {c_name} 失败: {err}'
     return True, '无需处理外置封面'
 
 
@@ -476,15 +590,19 @@ def apply_folder_artist_file(plan: FolderArtPlan) -> tuple[bool, str]:
 
 
 def delete_folder_cover_file(folder: str) -> tuple[bool, str]:
-    """删除目录中的外置 cover.jpg。"""
-    p = os.path.join(folder, 'cover.jpg')
-    if os.path.isfile(p):
-        try:
-            os.remove(p)
-            return True, '已删除目录 cover.jpg'
-        except OSError as err:
-            return False, f'删除 cover.jpg 失败: {err}'
-    return True, '目录不存在 cover.jpg'
+    """删除目录中的外置封面文件（优先 cover.jpg，兼顾已有的 folder.jpg）。"""
+    deleted_names = []
+    for name in ('cover.jpg', 'folder.jpg'):
+        p = os.path.join(folder, name)
+        if os.path.isfile(p):
+            try:
+                os.remove(p)
+                deleted_names.append(name)
+            except OSError as err:
+                return False, f'删除 {name} 失败: {err}'
+    if deleted_names:
+        return True, f'已删除目录 {"、".join(deleted_names)}'
+    return True, '目录不存在外置封面文件'
 
 
 def delete_folder_artist_file(folder: str) -> tuple[bool, str]:

@@ -8,6 +8,7 @@ import json
 import os
 import re
 import shutil
+import struct
 import subprocess
 import tempfile
 import time
@@ -16,12 +17,17 @@ from ctypes import wintypes
 from mutagen.aiff import AIFF
 from mutagen.apev2 import APEv2File
 from mutagen.asf import ASF
+from mutagen.dsdiff import DSDIFF
+from mutagen.dsf import DSF
 from mutagen.flac import FLAC, Picture
 from mutagen.id3 import ID3, TPOS, TRCK
 from mutagen.mp3 import MP3
 from mutagen.mp4 import MP4, MP4Cover
+from mutagen.musepack import Musepack
 from mutagen.oggopus import OggOpus
 from mutagen.oggvorbis import OggVorbis
+from mutagen.tak import TAK
+from mutagen.trueaudio import TrueAudio
 from mutagen.wave import WAVE
 from mutagen.wavpack import WavPack
 
@@ -34,11 +40,15 @@ AUDIO_EXTS = {
     '.flac', '.mp3', '.mp2', '.m4a', '.mp4', '.m4b', '.alac',
     '.ogg', '.oga', '.opus', '.wav', '.wave', '.aiff', '.aif', '.aifc',
     '.wma', '.asf', '.ape', '.wv',
+    '.dsf', '.tak', '.mpc', '.tta', '.dff',
 }
 
-SUPPORTS_EMBEDDED_LYRICS = {'flac', 'mp3', 'mp4', 'ogg', 'opus', 'asf', 'aiff', 'wav', 'ape', 'wv'}
-PREFER_EXTERNAL_LRC_CONTAINERS = {'wav', 'ape', 'wv'}
-CONVERT_TARGET_FORMATS = ('flac', 'mp3', 'm4a', 'ogg', 'opus', 'wav', 'aiff')
+SUPPORTS_EMBEDDED_LYRICS = {
+    'flac', 'mp3', 'mp4', 'ogg', 'opus', 'asf', 'aiff', 'wav', 'ape', 'wv',
+    'dsf', 'tta', 'tak', 'mpc',
+}
+PREFER_EXTERNAL_LRC_CONTAINERS = {'wav', 'ape', 'wv', 'tak', 'mpc', 'dff'}
+CONVERT_TARGET_FORMATS = ('flac', 'mp3', 'm4a', 'ogg', 'opus', 'wav', 'aiff', 'dsf')
 
 _EXT_FAMILY = {
     'flac': 'flac', 'mp3': 'mp3', 'mp2': 'mp3', 'mpa': 'mp3',
@@ -46,12 +56,14 @@ _EXT_FAMILY = {
     'ogg': 'ogg', 'oga': 'ogg', 'opus': 'ogg',
     'wav': 'wav', 'wave': 'wav', 'aiff': 'aiff', 'aif': 'aiff', 'aifc': 'aiff',
     'wma': 'asf', 'asf': 'asf', 'ape': 'ape', 'wv': 'wv',
+    'dsf': 'dsf', 'tta': 'tta', 'tak': 'ape', 'mpc': 'ape', 'dff': 'dff',
 }
 _CONTAINER_FAMILY = {'opus': 'ogg', 'mp4': 'mp4', 'asf': 'asf'}
 
 LOADERS = {
     'flac': FLAC, 'mp3': MP3, 'mp4': MP4, 'ogg': OggVorbis, 'opus': OggOpus,
     'wav': WAVE, 'aiff': AIFF, 'asf': ASF, 'ape': APEv2File, 'wv': WavPack,
+    'dsf': DSF, 'tta': TrueAudio, 'tak': TAK, 'mpc': Musepack, 'dff': DSDIFF,
 }
 
 _NETEASE_163_KEY = b"#14ljk_!\\]&0U<'("
@@ -163,7 +175,21 @@ def sniff_container(path: str) -> str | None:
         return None
     if head[:4] == b'fLaC':
         return 'flac'
-    if head[:3] == b'ID3' or (head[0] == 0xFF and (head[1] & 0xE0) == 0xE0):
+    if head[:4] == b'DSD ':
+        return 'dsf'
+    if head[:4] == b'FRM8':
+        return 'dff'
+    if head[:4] == b'tBaK':
+        return 'tak'
+    if head[:3] == b'MP+' or head[:4] == b'MPCK':
+        return 'mpc'
+    if head[:4] == b'TTA1':
+        return 'tta'
+    if head[:3] == b'ID3':
+        if path.lower().endswith('.tta'):
+            return 'tta'
+        return 'mp3'
+    if (head[0] == 0xFF and (head[1] & 0xE0) == 0xE0):
         return 'mp3'
     if len(head) >= 8 and head[4:8] == b'ftyp':
         return 'mp4'
@@ -199,10 +225,10 @@ def container_family(audio, container: str | None = None) -> str:
         return 'mp4'
     if c == 'asf':
         return 'asf'
-    if c in ('ape', 'wv'):
+    if c in ('ape', 'wv', 'tak', 'mpc'):
         return 'ape'
     tags_obj = getattr(audio, 'tags', audio) if audio is not None else None
-    if c in ('mp3', 'wav', 'aiff') or isinstance(tags_obj, ID3):
+    if c in ('mp3', 'wav', 'aiff', 'dsf', 'tta') or isinstance(tags_obj, ID3):
         return 'id3'
     return ''
 
@@ -282,29 +308,78 @@ _KV_MAP = {
     'vorbis': {
         'title': ('TITLE',), 'artist': ('ARTIST',), 'albumartist': ('ALBUMARTIST', 'ALBUM ARTIST'),
         'album': ('ALBUM',), 'date': ('DATE', 'YEAR'),
-        'composer': ('COMPOSER',), 'performer': ('PERFORMER',), 'genre': ('GENRE',),
+        'composer': ('COMPOSER',), 'lyricist': ('LYRICIST', 'TEXT WRITER', 'WORDS'),
+        'arranger': ('ARRANGER', 'ARRANGEMENT'), 'performer': ('PERFORMER',), 'genre': ('GENRE',),
         'tracknumber': ('TRACKNUMBER', 'TRACK'), 'discnumber': ('DISCNUMBER', 'DISC'),
     },
     'asf': {
         'title': ('Title',), 'artist': ('Author',), 'albumartist': ('WM/AlbumArtist',),
         'album': ('WM/AlbumTitle',), 'date': ('WM/Year',),
-        'composer': ('WM/Composer',), 'performer': ('WM/Performer', 'Performer'), 'genre': ('WM/Genre',),
+        'composer': ('WM/Composer',), 'lyricist': ('WM/Writer', 'WM/Lyricist'),
+        'arranger': ('WM/Arranger',), 'performer': ('WM/Performer', 'Performer'), 'genre': ('WM/Genre',),
         'tracknumber': ('WM/TrackNumber',), 'discnumber': ('WM/PartOfSet',), 'comment': ('Description',),
     },
     'ape': {
         'title': ('Title', 'TITLE'), 'artist': ('Artist', 'ARTIST'),
         'albumartist': ('Album Artist', 'ALBUM ARTIST', 'ALBUMARTIST'), 'album': ('Album', 'ALBUM'),
         'date': ('Year', 'DATE'),
-        'composer': ('Composer', 'COMPOSER'), 'performer': ('Performer', 'PERFORMER'), 'genre': ('Genre', 'GENRE'),
+        'composer': ('Composer', 'COMPOSER'), 'lyricist': ('Lyricist', 'LYRICIST'),
+        'arranger': ('Arranger', 'ARRANGER'), 'performer': ('Performer', 'PERFORMER'), 'genre': ('Genre', 'GENRE'),
         'tracknumber': ('Track', 'TRACK', 'TRACKNUMBER'),
         'discnumber': ('Disc', 'DISC', 'DISCNUMBER'), 'comment': ('Comment', 'COMMENT'),
     },
 }
 _ID3_MAP = {
     'title': ('TIT2',), 'artist': ('TPE1',), 'albumartist': ('TPE2',), 'album': ('TALB',),
-    'date': ('TDRC', 'TYER'), 'composer': ('TCOM',), 'genre': ('TCON',),
-    'tracknumber': ('TRCK',), 'discnumber': ('TPOS',), 'comment': ('COMM',),
+    'date': ('TDRC', 'TYER'), 'composer': ('TCOM',), 'lyricist': ('TEXT',), 'genre': ('TCON',),
+    'tracknumber': ('TRCK',), 'discnumber': ('TPOS',),
 }
+
+_IGNORED_ID3_COMM_DESCS = frozenset({
+    'itunnorm', 'itunsmpb', 'itunmovi', 'itunes_cddb_ids', 'itunes_cddb_tracknumber', 'itunes_cddb_1',
+    'musicip puid', 'acoustid id', 'acoustid fingerprint',
+})
+
+
+def _read_id3_comment(tags) -> tuple[str, str]:
+    """读取 ID3 COMM 标签，返回 (comment, raw_comment)。
+
+    1. 优先读取标准空描述的主注释 (desc='')。
+    2. 过滤掉 iTunes/Apple 内部非注释元数据帧。
+    3. 若只有 ID3v1 兼容注释副本或其它非标准 desc 则回退读取。
+    4. 对相同内容去重，避免重复拼接 (如 'EAC FLAC -8, EAC FLAC -8')。
+    5. raw_comment 保留包含 163 key 的完整注释，便于解密与保护。
+    """
+    if not tags:
+        return '', ''
+    try:
+        frames = tags.getall('COMM')
+    except Exception:
+        frames = []
+    if not frames:
+        return '', ''
+
+    primary: list[str] = []
+    fallback: list[str] = []
+    raw_all: list[str] = []
+
+    for f in frames:
+        desc = str(getattr(f, 'desc', '') or '').strip()
+        txt = _as_text(getattr(f, 'text', None) or str(f))
+        if not txt:
+            continue
+        raw_all.append(txt)
+        if desc.lower() in _IGNORED_ID3_COMM_DESCS:
+            continue
+        if not desc:
+            primary.append(txt)
+        else:
+            fallback.append(txt)
+
+    chosen = primary if primary else fallback
+    cmt = ', '.join(dict.fromkeys(chosen))
+    raw_cmt = ', '.join(dict.fromkeys(raw_all)) if raw_all else cmt
+    return cmt, raw_cmt
 
 
 def _read_id3_performer(tags) -> str:
@@ -327,6 +402,50 @@ def _read_id3_performer(tags) -> str:
                         if person:
                             vals.append(f'{person} ({role})' if role else person)
     return ', '.join(dict.fromkeys(vals))
+
+
+def _read_id3_arranger(tags) -> str:
+    if not tags:
+        return ''
+    vals: list[str] = []
+    for fid in ('TXXX', 'TIPL', 'IPLS'):
+        try:
+            frames = tags.getall(fid)
+        except Exception:
+            frames = []
+        for f in frames:
+            if fid == 'TXXX':
+                desc = str(getattr(f, 'desc', '') or '').strip().upper()
+                if desc in ('ARRANGER', 'ARRANGEMENT'):
+                    txt = _as_text(getattr(f, 'text', None))
+                    if txt:
+                        vals.append(txt)
+            else:
+                for pair in getattr(f, 'people', None) or []:
+                    if isinstance(pair, (list, tuple)) and len(pair) >= 2:
+                        role, person = str(pair[0] or '').strip().lower(), str(pair[1] or '').strip()
+                        if ('arrang' in role or '编曲' in role) and person:
+                            vals.append(person)
+    return ', '.join(dict.fromkeys(vals))
+
+
+def _read_id3_lyricist(tags) -> str:
+    txt = _id3_text(tags, 'TEXT')
+    if txt:
+        return txt
+    if not tags:
+        return ''
+    try:
+        frames = tags.getall('TXXX')
+    except Exception:
+        frames = []
+    for f in frames:
+        desc = str(getattr(f, 'desc', '') or '').strip().upper()
+        if desc in ('LYRICIST', 'WORDS', 'TEXT WRITER', 'WRITER'):
+            val = _as_text(getattr(f, 'text', None))
+            if val:
+                return val
+    return ''
 
 
 _EMBEDDED_LYRICS_KEYS = {
@@ -409,7 +528,7 @@ def read_audio_info(path: str) -> dict:
     info = {
         'path': path, 'container': None, 'extension_mismatch': False,
         'title': '', 'artist': '', 'albumartist': '', 'album': '', 'date': '',
-        'composer': '', 'performer': '', 'genre': '',
+        'composer': '', 'lyricist': '', 'arranger': '', 'performer': '', 'genre': '',
         'tracknumber': '', 'track_int': None, 'discnumber': '', 'disc_int': None,
         'comment': '', 'raw_comment': '', 'has_163_key': False,
         'lyrics': '', 'has_embedded_lyrics': False, 'has_lrc_file': False, 'has_lyrics': False,
@@ -436,7 +555,7 @@ def read_audio_info(path: str) -> dict:
     tags = getattr(audio, 'tags', None)
     emb_lyrics = ''
     if tags:
-        if container in ('flac', 'ogg', 'opus', 'asf', 'ape', 'wv'):
+        if container in ('flac', 'ogg', 'opus', 'asf', 'ape', 'wv', 'tak', 'mpc'):
             fam = 'vorbis' if container in ('flac', 'ogg', 'opus') else ('asf' if container == 'asf' else 'ape')
             for field, keys in _KV_MAP[fam].items():
                 info[field] = _tag_text(tags, *keys)
@@ -450,8 +569,11 @@ def read_audio_info(path: str) -> dict:
         elif isinstance(tags, ID3):
             for field, fids in _ID3_MAP.items():
                 info[field] = _id3_text(tags, *fids)
+            if not info['lyricist']:
+                info['lyricist'] = _read_id3_lyricist(tags)
+            info['arranger'] = _read_id3_arranger(tags)
             info['performer'] = _read_id3_performer(tags)
-            info['raw_comment'] = info['comment']
+            info['comment'], info['raw_comment'] = _read_id3_comment(tags)
         elif container == 'mp4':
             for field, key in (('title', '\xa9nam'), ('artist', '\xa9ART'), ('albumartist', 'aART'),
                                ('album', '\xa9alb'), ('date', '\xa9day'), ('composer', '\xa9wrt'),
@@ -465,6 +587,22 @@ def read_audio_info(path: str) -> dict:
                     if txt:
                         parts.append(txt)
                 info['performer'] = ', '.join(parts)
+            lyr_val = tags.get('----:com.apple.iTunes:LYRICIST')
+            if lyr_val:
+                parts = []
+                for item in (lyr_val if isinstance(lyr_val, (list, tuple)) else [lyr_val]):
+                    txt = bytes(item).decode('utf-8', errors='replace').strip() if isinstance(item, (bytes, bytearray)) else str(item).strip()
+                    if txt:
+                        parts.append(txt)
+                info['lyricist'] = ', '.join(parts)
+            arr_val = tags.get('----:com.apple.iTunes:ARRANGER')
+            if arr_val:
+                parts = []
+                for item in (arr_val if isinstance(arr_val, (list, tuple)) else [arr_val]):
+                    txt = bytes(item).decode('utf-8', errors='replace').strip() if isinstance(item, (bytes, bytearray)) else str(item).strip()
+                    if txt:
+                        parts.append(txt)
+                info['arranger'] = ', '.join(parts)
             info['raw_comment'] = info['comment']
             for field, key in (('tracknumber', 'trkn'), ('discnumber', 'disk')):
                 val = tags.get(key)
@@ -623,6 +761,8 @@ def atomic_mutate_audio(
     except OSError:
         orig_mtime = 0.0
     container = sniff_container(path)
+    if container == 'dff':
+        return False, 'DFF 格式遵循发烧规范保护，不支持直接内嵌写标，请使用同目录 cover/lrc 资产或转封装为 .dsf'
     loader = LOADERS.get(container) if container else None
     if not container or loader is None:
         return False, '无法识别的音频容器' if not container else f'暂不支持写入 {container} 格式'
@@ -638,7 +778,7 @@ def atomic_mutate_audio(
             changed, msg = mutator_fn(audio, container, path)
             if not changed:
                 return True, msg or '无需修改'
-            audio.save(v2_version=3) if container == 'mp3' else audio.save()
+            audio.save(v2_version=3) if container in ('mp3', 'dsf', 'tta') else audio.save()
             try:
                 bump_mtime(path, min_prev_mtime=orig_mtime)
             except OSError:
@@ -675,7 +815,7 @@ def atomic_mutate_audio(
             changed, msg = mutator_fn(audio, container, temp_path)
             if not changed:
                 return True, msg or '无需修改'
-            audio.save(v2_version=3) if container == 'mp3' else audio.save()
+            audio.save(v2_version=3) if container in ('mp3', 'dsf', 'tta') else audio.save()
 
             if verify_fn is not None:
                 ok_v, err_v = verify_fn(temp_path, container)
@@ -961,8 +1101,160 @@ def delete_lrc_file(audio_path: str) -> tuple[bool, str]:
     return False, f'删除 {os.path.basename(lrc_path)} 失败'
 
 
+def remux_dff_to_dsf(
+    input_path: str,
+    output_path: str,
+    copy_tags: bool = True,
+) -> tuple[bool, str]:
+    """纯 Python 零依赖流式将 DFF (DSDIFF) 音频无损转封装为 Sony DSF 格式。"""
+    if not input_path or not os.path.isfile(input_path):
+        return False, 'DFF 源文件不存在'
+    try:
+        file_size = os.path.getsize(input_path)
+    except OSError:
+        file_size = 0
+    if file_size < 32:
+        return False, 'DFF 文件尺寸过小或已损坏'
+
+    try:
+        with open(input_path, 'rb') as fp_in:
+            head = fp_in.read(12)
+            if len(head) < 12 or head[:4] != b'FRM8':
+                return False, '非有效的 DSDIFF (FRM8) 文件格式'
+            form_type = fp_in.read(4)
+            if form_type != b'DSD ':
+                return False, f'不支持的 DSDIFF 根容器类型: {form_type!r}'
+
+            sample_rate = 0
+            channels = 0
+            compression = b'DSD '
+            dsd_data_offset = 0
+            dsd_data_size = 0
+
+            while fp_in.tell() < file_size:
+                ch_hdr = fp_in.read(12)
+                if len(ch_hdr) < 12:
+                    break
+                cid, csize = struct.unpack('>4sQ', ch_hdr)
+                pos = fp_in.tell()
+                pad = csize % 2
+
+                if cid == b'PROP':
+                    if csize >= 4:
+                        p_type = fp_in.read(4)
+                        while fp_in.tell() < pos + csize:
+                            sub_hdr = fp_in.read(12)
+                            if len(sub_hdr) < 12:
+                                break
+                            scid, scsize = struct.unpack('>4sQ', sub_hdr)
+                            sub_pos = fp_in.tell()
+                            sub_pad = scsize % 2
+                            if scid == b'FS  ' and scsize >= 4:
+                                sample_rate, = struct.unpack('>I', fp_in.read(4))
+                            elif scid == b'CHNL' and scsize >= 2:
+                                channels, = struct.unpack('>H', fp_in.read(2))
+                            elif scid == b'CMPR' and scsize >= 4:
+                                compression = fp_in.read(4)
+                            fp_in.seek(sub_pos + scsize + sub_pad)
+                elif cid == b'DSD ':
+                    dsd_data_offset = pos
+                    dsd_data_size = csize
+                    break
+                fp_in.seek(pos + csize + pad)
+
+            if compression != b'DSD ':
+                cmpr_name = compression.decode('ascii', errors='replace').strip()
+                return False, f'该 DFF 文件采用了 {cmpr_name} 压缩，暂不支持纯流拷贝，建议使用 sacd_extract 解压'
+            if sample_rate <= 0:
+                return False, '未读取到有效的 DSD 采样率'
+            if channels <= 0:
+                return False, '未读取到有效的声道数'
+            if dsd_data_offset <= 0 or dsd_data_size <= 0:
+                return False, '未找到有效的 DSD 音频数据块'
+
+            block_size = 4096
+            sample_count = (dsd_data_size * 8) // channels
+            bytes_per_ch = dsd_data_size // channels
+            full_blocks = bytes_per_ch // block_size
+            rem_bytes = bytes_per_ch % block_size
+            total_blocks = full_blocks + (1 if rem_bytes else 0)
+            dsf_data_payload_size = total_blocks * block_size * channels
+
+            _DSF_CH_TYPE = {1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 7}
+            channel_type = _DSF_CH_TYPE.get(channels, 2)
+
+            dsd_hdr = b'DSD ' + struct.pack('<QQQ', 28, 28 + 52 + 12 + dsf_data_payload_size, 0)
+            fmt_hdr = b'fmt ' + struct.pack(
+                '<QIIIIIIQII',
+                52, 1, 0, channel_type, channels, sample_rate, 1, sample_count, block_size, 0,
+            )
+            data_hdr = b'data' + struct.pack('<Q', 12 + dsf_data_payload_size)
+
+            folder = os.path.dirname(output_path) or '.'
+            if folder and not os.path.isdir(folder):
+                os.makedirs(folder, exist_ok=True)
+
+            with open(output_path, 'wb') as fp_out:
+                fp_out.write(dsd_hdr + fmt_hdr + data_hdr)
+                fp_in.seek(dsd_data_offset)
+
+                chunk_read_size = block_size * channels
+                bytes_left = dsd_data_size
+                while bytes_left > 0:
+                    to_read = min(chunk_read_size, bytes_left)
+                    buf = fp_in.read(to_read)
+                    if not buf:
+                        break
+                    bytes_left -= len(buf)
+
+                    if channels == 2:
+                        left = buf[0::2]
+                        right = buf[1::2]
+                        if len(left) < block_size:
+                            left += b'\x00' * (block_size - len(left))
+                        if len(right) < block_size:
+                            right += b'\x00' * (block_size - len(right))
+                        fp_out.write(left + right)
+                    elif channels == 1:
+                        if len(buf) < block_size:
+                            buf += b'\x00' * (block_size - len(buf))
+                        fp_out.write(buf)
+                    else:
+                        for ch_i in range(channels):
+                            ch_slice = buf[ch_i::channels]
+                            if len(ch_slice) < block_size:
+                                ch_slice += b'\x00' * (block_size - len(ch_slice))
+                            fp_out.write(ch_slice)
+
+        if copy_tags:
+            try:
+                src_dff = DSDIFF(input_path)
+                if getattr(src_dff, 'tags', None):
+                    dst_dsf = DSF(output_path)
+                    dst_dsf.add_tags()
+                    for frame in src_dff.tags.values():
+                        dst_dsf.tags.add(frame)
+                    dst_dsf.save(v2_version=3)
+            except Exception:
+                pass
+
+        return True, '转封装成功'
+    except Exception as err:
+        return False, f'转封装失败: {type(err).__name__}: {err}'
+
+
 def find_ffmpeg() -> str | None:
     return shutil.which('ffmpeg')
+
+
+def find_sacd_extract() -> str | None:
+    """查找 sacd_extract.exe 路径。"""
+    try:
+        from infra.tools.sacd import find_sacd_extract as _find
+        return _find()
+    except Exception:
+        return shutil.which('sacd_extract')
+
 
 
 def convert_audio_file(
@@ -974,15 +1266,12 @@ def convert_audio_file(
     copy_sidecar_lrc: bool = True,
     post_hook=None,
 ) -> tuple[bool, str, str]:
-    """使用 ffmpeg 将音频转为目标格式（保留元数据，支持后置封面/标签校验与原子替换）。"""
+    """将音频转为目标格式（支持 DFF ➜ DSF 极速无损转封装与 ffmpeg 格式转换，保留元数据与外置歌词）。"""
     fmt = str(target_format or '').strip().lower().lstrip('.')
     if fmt not in CONVERT_TARGET_FORMATS:
         return False, f'不支持的目标格式: {fmt}', ''
     if not input_path or not os.path.isfile(input_path):
         return False, '源文件不存在', ''
-    ffmpeg_bin = find_ffmpeg()
-    if not ffmpeg_bin:
-        return False, '未找到 ffmpeg，请先安装 ffmpeg 并加入系统 PATH', ''
 
     folder = os.path.dirname(input_path) or '.'
     stem = os.path.splitext(os.path.basename(input_path))[0]
@@ -991,6 +1280,61 @@ def convert_audio_file(
         return True, f'已是 .{fmt} 格式，跳过', output_path
     if os.path.exists(output_path) and not overwrite:
         return False, f'目标文件已存在（开启覆盖可替换）: {os.path.basename(output_path)}', output_path
+
+    src_container = sniff_container(input_path)
+
+    # 1. DFF ➜ DSF 纯 Python 极速流式无损转封装通道（零外部依赖）
+    if fmt == 'dsf':
+        if src_container != 'dff':
+            return False, f'暂不支持将 {src_container or "该"} 格式转为 DSF（目前仅支持 DFF ➜ DSF 无损转封装）', ''
+        temp_path = None
+        try:
+            fd, temp_path = tempfile.mkstemp(prefix=stem + '.', suffix=f'.musictmp.{fmt}', dir=folder)
+            os.close(fd)
+            ok_remux, remux_msg = remux_dff_to_dsf(input_path, temp_path, copy_tags=True)
+            if not ok_remux:
+                return False, remux_msg, ''
+
+            if post_hook is not None:
+                ok_hook, hook_msg = post_hook(input_path, temp_path, fmt)
+                if not ok_hook:
+                    return False, hook_msg or '转换后处理失败', ''
+
+            chk = read_audio_info(temp_path)
+            if chk.get('error'):
+                return False, f"转换输出校验失败: {chk['error']}", ''
+
+            os.replace(temp_path, output_path)
+            temp_path = None
+            try:
+                bump_mtime(output_path)
+            except OSError:
+                pass
+
+            if copy_sidecar_lrc:
+                src_lrc = get_lrc_path(input_path)
+                dst_lrc = get_lrc_path(output_path)
+                if os.path.isfile(src_lrc) and os.path.normcase(src_lrc) != os.path.normcase(dst_lrc):
+                    if overwrite or not os.path.exists(dst_lrc):
+                        try:
+                            shutil.copy2(src_lrc, dst_lrc)
+                        except OSError:
+                            pass
+
+            if delete_source:
+                _remove_file_with_retry(input_path, attempts=4, base_delay=0.2)
+
+            return True, f'已转封装为 {os.path.basename(output_path)}', output_path
+        except Exception as err:
+            return False, f'{type(err).__name__}: {err}', ''
+        finally:
+            if temp_path and os.path.exists(temp_path):
+                _remove_file_with_retry(temp_path, attempts=3, base_delay=0.15)
+
+    # 2. 常规 ffmpeg 音频转码通道
+    ffmpeg_bin = find_ffmpeg()
+    if not ffmpeg_bin:
+        return False, '未找到 ffmpeg，请先安装 ffmpeg 并加入系统 PATH', ''
 
     temp_path = None
     try:

@@ -11,17 +11,19 @@ from typing import Callable
 
 from core.constants import (
     AUDIO_EXTS,
+    CONDITIONAL_EXTRA_FIELDS,
     CORE_TEXT_FIELDS,
     EXTRA_TEXT_FIELDS,
     FIELD_LABELS,
     STATUS_ERROR,
     STATUS_MISSING_DISK,
     STATUS_OK,
-    STATUS_STALE_FOOBAR,
+    STATUS_STALE_PLAYER,
     SUPPORTS_ARTIST_WRITE,
     SUPPORTS_COVER_WRITE,
+    SUPPORTS_EMBEDDED_LYRICS,
 )
-from core.models import FolderArtPlan, LibraryTrack
+from core.models import FolderArtPlan, LibraryTrack, default_track_sort_key
 from tag_io import bump_mtime, has_valid_tracknumber, read_audio_info
 
 _TEMP_COPY_RE = re.compile(r'^(.+)\.[a-z0-9_]{6,10}$', re.IGNORECASE)
@@ -54,6 +56,27 @@ def is_under_folders(path: str, folders: list[str]) -> bool:
     )
 
 
+def track_needs_lyrics(track: LibraryTrack, lyrics_mode: str = 'auto') -> bool:
+    """根据当前选定的歌词模式，动态判断是否需要补充歌词或写出/注入 .lrc。"""
+    if track.status == STATUS_ERROR or track.is_temp_duplicate:
+        return False
+    mode = str(lyrics_mode or 'auto').strip().lower()
+    can_embed = (track.container in SUPPORTS_EMBEDDED_LYRICS)
+    if mode == 'auto':
+        return track.needs_lyrics
+    elif mode == 'embed':
+        if can_embed:
+            return not track.has_embedded_lyrics
+        return not track.has_lrc_file
+    elif mode == 'lrc':
+        return not track.has_lrc_file
+    elif mode == 'both':
+        need_emb = (not track.has_embedded_lyrics) if can_embed else False
+        need_lrc = (not track.has_lrc_file)
+        return need_emb or need_lrc
+    return track.needs_lyrics
+
+
 def track_has_pending_work(
     track: LibraryTrack,
     enable_track: bool = True, enable_art: bool = True, enable_tags: bool = True,
@@ -61,6 +84,7 @@ def track_has_pending_work(
     enabled_tag_fields: set[str] | frozenset[str] | None = None,
     enable_lyrics: bool = False,
     enable_artist_art: bool = False,
+    lyrics_mode: str = 'auto',
 ) -> bool:
     if track.status == STATUS_ERROR or track.is_temp_duplicate:
         return False
@@ -68,9 +92,9 @@ def track_has_pending_work(
         return True
     if enable_art and (track.needs_cover_fix or track.needs_cover_online or track.folder_cover_action in ('create', 'rewrite', 'remove')):
         return True
-    if enable_artist_art and (track.needs_artist_art or track.folder_artist_action in ('create', 'rewrite', 'remove')):
+    if enable_artist_art and (track.needs_artist_art or track.folder_artist_action in ('create', 'rewrite', 'remove', 'nodata')):
         return True
-    if enable_lyrics and track.needs_lyrics and not (skip_full_album and track.is_full_album):
+    if enable_lyrics and track_needs_lyrics(track, lyrics_mode) and not (skip_full_album and track.is_full_album):
         return True
     if enable_tags:
         if enabled_tag_fields is None:
@@ -92,7 +116,7 @@ def track_has_pending_work(
             )
         if has_planned or (has_online and not (skip_full_album and track.is_full_album)):
             return True
-    if enable_sync and track.needs_foobar_sync:
+    if enable_sync and track.needs_player_sync:
         return True
     return False
 
@@ -314,10 +338,10 @@ def scan_library(
                 notes.append('音轨号为 0')
             if stale_reasons:
                 needs_sync = True
-                notes.append('foobar缓存:' + '、'.join(stale_reasons))
+                notes.append('播放器缓存:' + '、'.join(stale_reasons))
         elif stale_reasons:
-            status, needs_sync = STATUS_STALE_FOOBAR, True
-            notes.append('foobar缓存未刷新:' + '、'.join(stale_reasons))
+            status, needs_sync = STATUS_STALE_PLAYER, True
+            notes.append('播放器缓存未刷新:' + '、'.join(stale_reasons))
         else:
             status = STATUS_OK
 
@@ -332,8 +356,19 @@ def scan_library(
         )
         if needs_cov_online:
             cov_status = '缺封面(待联网)'
+        elif 'no-cover-source' in cov_reasons:
+            cov_status = '缺封面(手动挑选)'
         needs_tags = bool(t_plan and t_plan.needs_tag_fix)
         tag_updates = dict(t_plan.tag_updates) if t_plan else {}
+        if info.get('lyrics'):
+            from providers.base import parse_all_lyric_credits
+            lrc_credits = parse_all_lyric_credits(info['lyrics'])
+            for role in ('composer', 'lyricist', 'arranger'):
+                if not (info.get(role) or '').strip() and role not in tag_updates:
+                    val = lrc_credits.get(role)
+                    if val:
+                        tag_updates[role] = val
+                        needs_tags = True
 
         folder_art_action = f_plan.artist_action if f_plan else 'ok'
         artist_stat = t_plan.artist_status if t_plan else '正常'
@@ -344,11 +379,13 @@ def scan_library(
             and not temp_dup
             and (
                 (t_plan and t_plan.needs_artist_fix)
-                or (not has_art_art and (info.get('container') in SUPPORTS_ARTIST_WRITE or folder_art_action in ('create', 'rewrite')))
+                or (not has_art_art and (info.get('container') in SUPPORTS_ARTIST_WRITE or folder_art_action in ('create', 'rewrite', 'nodata')))
+                or (folder_art_action in ('create', 'rewrite', 'nodata'))
             )
         )
         if not has_art_art and artist_stat == '正常':
-            artist_stat = '缺艺术家图'
+            if info.get('container') in SUPPORTS_ARTIST_WRITE or folder_art_action in ('create', 'rewrite', 'nodata'):
+                artist_stat = '缺艺术家图'
 
         missing_core: list[str] = []
         missing_extra: list[str] = []
@@ -357,6 +394,8 @@ def scan_library(
                 if not (info.get(f) or '').strip() and f not in tag_updates:
                     missing_core.append(f)
             for f in EXTRA_TEXT_FIELDS:
+                if f in CONDITIONAL_EXTRA_FIELDS:
+                    continue
                 if f == 'discnumber':
                     if not (info.get('disc_int') or (info.get('discnumber') or '').strip()):
                         missing_extra.append(f)
@@ -386,12 +425,15 @@ def scan_library(
             notes.append('缺核心:' + ','.join(FIELD_LABELS[f] for f in missing_core))
         if missing_extra:
             notes.append('缺扩展:' + ','.join(FIELD_LABELS[f] for f in missing_extra))
+        if info.get('container') == 'dff' and (needs_tags or missing_core or needs_track):
+            notes.append('DFF格式保护不支持内嵌写标(建议使用顶部【格式转换】转封装为.dsf)')
 
         tracks.append(LibraryTrack(
             path=fp, filename=os.path.basename(fp), folder=os.path.dirname(fp),
             title=info.get('title') or '', artist=info.get('artist') or '',
             albumartist=info.get('albumartist') or '', album=info.get('album') or '',
             date=info.get('date') or '', composer=info.get('composer') or '',
+            lyricist=info.get('lyricist') or '', arranger=info.get('arranger') or '',
             performer=info.get('performer') or '', genre=info.get('genre') or '',
             duration=float(info.get('duration') or 0.0),
             disk_tracknumber=info.get('tracknumber') or '', disk_track_int=info.get('track_int'),
@@ -407,13 +449,15 @@ def scan_library(
             foobar_title=fb.get('title', '') if fb else '', foobar_artist=fb.get('artist', '') if fb else '',
             foobar_albumartist=fb.get('albumartist', '') if fb else '', foobar_album=fb.get('album', '') if fb else '',
             foobar_date=fb.get('date', '') if fb else '', foobar_composer=fb.get('composer', '') if fb else '',
+            foobar_lyricist=fb.get('lyricist', '') if fb else '', foobar_arranger=fb.get('arranger', '') if fb else '',
             foobar_performer=fb.get('performer', '') if fb else '', foobar_genre=fb.get('genre', '') if fb else '',
             foobar_discnumber=fb.get('discnumber', '') if fb else '', foobar_comment=fb.get('comment', '') if fb else '',
-            foobar_size=fb['size'] if fb else None,
-            foobar_mtime=fb['mtime'] if fb else 0.0, foobar_stale_reasons=stale_reasons,
+            cached_size=fb['size'] if fb else None,
+            cached_mtime=fb['mtime'] if fb else 0.0,
             disk_size=disk_size, disk_mtime=disk_mtime, status=status,
             is_full_album=full_album, is_temp_duplicate=temp_dup, note='；'.join(notes),
-            needs_tracknumber=needs_track, needs_foobar_sync=needs_sync,
+            needs_tracknumber=needs_track, needs_player_sync=needs_sync,
+            player_stale_reasons=stale_reasons,
             needs_cover_fix=needs_cov, needs_cover_online=needs_cov_online,
             cover_status=cov_status, cover_reasons=cov_reasons,
             target_pic_bytes=t_plan.target_pic_bytes if t_plan else None,
@@ -432,4 +476,5 @@ def scan_library(
         ))
     if include_art_scan:
         reconcile_album_consistency(tracks)
+    tracks.sort(key=default_track_sort_key)
     return tracks

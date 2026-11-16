@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import threading
 
+from core.zh_norm import to_simplified, to_traditional
 from providers.base import (
     MusicProvider,
     ProviderCircuitBreaker,
@@ -77,31 +78,112 @@ class FanartTvProvider(MusicProvider):
     supports_album_search = False
     circuit_breaker = _FANART_CB
 
+    def search_artist_candidates(self, artist_name: str, *, track_hint: str = '') -> list[dict]:
+        name = (artist_name or '').strip()
+        if not name:
+            return []
+
+        # 1. 通过 MusicBrainz 检索艺术家 MBID
+        mb_res = mb_get('https://musicbrainz.org/ws/2/artist/', params={'query': f'artist:{name}', 'fmt': 'json'})
+        artists = (mb_res or {}).get('artists') or [] if isinstance(mb_res, dict) else []
+        if not artists:
+            trad_n = to_traditional(name)
+            if trad_n != name:
+                mb_res = mb_get('https://musicbrainz.org/ws/2/artist/', params={'query': f'artist:{trad_n}', 'fmt': 'json'})
+                artists = (mb_res or {}).get('artists') or [] if isinstance(mb_res, dict) else []
+        if not artists:
+            simp_n = to_simplified(name)
+            if simp_n != name:
+                mb_res = mb_get('https://musicbrainz.org/ws/2/artist/', params={'query': f'artist:{simp_n}', 'fmt': 'json'})
+                artists = (mb_res or {}).get('artists') or [] if isinstance(mb_res, dict) else []
+        if not artists:
+            return []
+
+        matched_artist = artists[0]
+        mbid = str(matched_artist.get('id') or '').strip()
+        if not mbid:
+            return []
+        artist_display = str(matched_artist.get('name') or '').strip() or name
+        disambig = str(matched_artist.get('disambiguation') or '').strip()
+
+        # 2. 从 Fanart.tv 获取艺人高清写真
+        data = _fanart_get(f'music/{mbid}')
+        if not isinstance(data, dict):
+            return []
+
+        results: list[dict] = []
+        seen_pics: set[str] = set()
+
+        # 2.1 宽幅舞台写真壁纸 (artistbackground, 1920x1080)
+        bg_items = data.get('artistbackground') or []
+        if isinstance(bg_items, list):
+            valid_bg = [x for x in bg_items if isinstance(x, dict) and str(x.get('url') or '').startswith('http')]
+            valid_bg.sort(key=lambda x: int(x.get('likes') or 0), reverse=True)
+            for item in valid_bg:
+                url = str(item.get('url') or '').strip()
+                if not url or url in seen_pics:
+                    continue
+                seen_pics.add(url)
+                likes = int(item.get('likes') or 0)
+                clue = f'社区舞台写真 · {likes} 赞'
+                if disambig:
+                    clue = f'{disambig} · {clue}'
+                results.append({
+                    'source': self.label,
+                    'platform': self.id,
+                    'artist_name': artist_display,
+                    'pic_url': url,
+                    'aspect_type': 'landscape',
+                    'resolution': '1920×1080 横版',
+                    'width': 1920,
+                    'height': 1080,
+                    'clues': clue,
+                    'raw_meta': item,
+                })
+
+        # 2.2 高清头像缩略图 (artistthumb, 1000x1000)
+        thumb_items = data.get('artistthumb') or []
+        if isinstance(thumb_items, list):
+            valid_th = [x for x in thumb_items if isinstance(x, dict) and str(x.get('url') or '').startswith('http')]
+            valid_th.sort(key=lambda x: int(x.get('likes') or 0), reverse=True)
+            for item in valid_th:
+                url = str(item.get('url') or '').strip()
+                if not url or url in seen_pics:
+                    continue
+                seen_pics.add(url)
+                likes = int(item.get('likes') or 0)
+                clue = f'精选肖像头像 · {likes} 赞'
+                if disambig:
+                    clue = f'{disambig} · {clue}'
+                results.append({
+                    'source': self.label,
+                    'platform': self.id,
+                    'artist_name': artist_display,
+                    'pic_url': url,
+                    'aspect_type': 'square',
+                    'resolution': '1000×1000 方图',
+                    'width': 1000,
+                    'height': 1000,
+                    'clues': clue,
+                    'raw_meta': item,
+                })
+
+        return results
+
     def search_artist(self, artist_name: str) -> str:
         name = (artist_name or '').strip()
         if not name:
             return ''
 
         def _fetch() -> str:
-            # 1. 通过 MusicBrainz 检索艺术家 MBID
-            mb_res = mb_get('https://musicbrainz.org/ws/2/artist/', params={'query': f'artist:{name}', 'fmt': 'json'})
-            artists = (mb_res or {}).get('artists') or [] if isinstance(mb_res, dict) else []
-            if not artists:
+            cands = self.search_artist_candidates(name)
+            if not cands:
                 return ''
-            mbid = str(artists[0].get('id') or '').strip()
-            if not mbid:
-                return ''
-
-            # 2. 从 Fanart.tv 获取艺人高清写真
-            data = _fanart_get(f'music/{mbid}')
-            if not isinstance(data, dict):
-                return ''
-
-            # 优先使用 1:1 高清头像/缩略图 (artistthumb)，回退使用背景壁纸 (artistbackground)
-            url = _pick_best_image_url(data.get('artistthumb'))
-            if not url:
-                url = _pick_best_image_url(data.get('artistbackground'))
-            return url
+            # 优先 1:1 头像，次选横版壁纸
+            thumbs = [c for c in cands if c['aspect_type'] == 'square']
+            if thumbs:
+                return thumbs[0]['pic_url']
+            return cands[0]['pic_url']
 
         return cached_artist_url('fanart', name, _fetch)
 

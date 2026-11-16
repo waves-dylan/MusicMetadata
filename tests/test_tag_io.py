@@ -13,7 +13,7 @@ from mutagen.mp3 import MP3
 from mutagen.wave import WAVE
 
 from core.models import FoobarEnv
-from infra.integrations.foobar import scan_library
+from infra.integrations.foobar import find_foobar_cache_diffs, scan_library
 from services.art import (
     analyze_folder_art_and_tags,
     apply_track_deletions,
@@ -23,6 +23,7 @@ from services.art import (
 )
 from tag_io import (
     bump_mtime,
+    convert_audio_file,
     decode_163_key,
     delete_lrc_file,
     get_lrc_path,
@@ -31,6 +32,7 @@ from tag_io import (
     parse_filename_clues,
     read_audio_info,
     read_lrc_file,
+    remux_dff_to_dsf,
     sniff_container,
     write_lrc_file,
     write_tracknumber,
@@ -380,6 +382,262 @@ class TagIOTests(TempTrackTestCase):
         self.assertTrue(info_f2['has_lrc_file'])
         self.assertIn('163 key', info_f2['comment'])
         delete_lrc_file(flac_p)
+
+    def test_sniff_and_roundtrip_dsf_tak_mpc_tta(self):
+        dsf_path = self._make_minimal_dsf('sample.dsf')
+        tta_path = self._make_minimal_tta('sample.tta')
+        tak_path = self._make_minimal_tak('sample.tak')
+        mpc_path = self._make_minimal_mpc('sample.mpc')
+
+        self.assertEqual(sniff_container(dsf_path), 'dsf')
+        self.assertEqual(sniff_container(tta_path), 'tta')
+        self.assertEqual(sniff_container(tak_path), 'tak')
+        self.assertEqual(sniff_container(mpc_path), 'mpc')
+
+        # 写入与校验音轨号
+        for fp, num in ((dsf_path, 2), (tta_path, 4), (tak_path, 6), (mpc_path, 8)):
+            info_b = read_audio_info(fp)
+            self.assertFalse(has_valid_tracknumber(info_b), fp)
+            ok, msg = write_tracknumber(fp, num)
+            self.assertTrue(ok, f'{fp}: {msg}')
+            info_a = read_audio_info(fp)
+            self.assertEqual(info_a['track_int'], num, fp)
+            self.assertTrue(has_valid_tracknumber(info_a), fp)
+
+        cov_bytes = self._make_jpeg_bytes(120, 120, (10, 50, 90))
+        art_bytes = self._make_jpeg_bytes(100, 100, (90, 50, 10))
+
+        # 1. DSF: ID3v2.3 标签、APIC 双封面与内嵌歌词
+        ok_dsf, msg_dsf = apply_track_repairs(
+            dsf_path,
+            tag_updates={'title': 'DSF Track', 'artist': 'DSF Artist', 'album': 'DSF Album', 'composer': 'DSF Comp', 'lyricist': 'DSF Lyr', 'arranger': 'DSF Arr'},
+            cover_bytes=cov_bytes,
+            artist_bytes=art_bytes,
+            lyrics='[00:01.00]DSF Lyrics Line 1\n[00:05.00]DSF Lyrics Line 2',
+        )
+        self.assertTrue(ok_dsf, msg_dsf)
+        info_dsf = read_audio_info(dsf_path)
+        self.assertEqual(info_dsf['title'], 'DSF Track')
+        self.assertEqual(info_dsf['artist'], 'DSF Artist')
+        self.assertEqual(info_dsf['album'], 'DSF Album')
+        self.assertEqual(info_dsf['composer'], 'DSF Comp')
+        self.assertEqual(info_dsf['lyricist'], 'DSF Lyr')
+        self.assertEqual(info_dsf['arranger'], 'DSF Arr')
+        self.assertTrue(info_dsf['has_embedded_lyrics'])
+        self.assertGreaterEqual(len(info_dsf['pics']), 2)
+
+        # 2. TTA: ID3v2 标签、APIC 封面与内嵌歌词
+        ok_tta, msg_tta = apply_track_repairs(
+            tta_path,
+            tag_updates={'title': 'TTA Track', 'artist': 'TTA Artist', 'album': 'TTA Album'},
+            cover_bytes=cov_bytes,
+            lyrics='[00:01.00]TTA Lyrics Line',
+        )
+        self.assertTrue(ok_tta, msg_tta)
+        info_tta = read_audio_info(tta_path)
+        self.assertEqual(info_tta['title'], 'TTA Track')
+        self.assertEqual(info_tta['artist'], 'TTA Artist')
+        self.assertTrue(info_tta['has_embedded_lyrics'])
+        self.assertGreaterEqual(len(info_tta['pics']), 1)
+
+        # 3. TAK: APEv2 标签与歌词
+        ok_tak, msg_tak = apply_track_repairs(
+            tak_path,
+            tag_updates={'title': 'TAK Track', 'artist': 'TAK Artist', 'album': 'TAK Album', 'genre': 'Rock'},
+            lyrics='[00:02.00]TAK Lyrics Line',
+            lyrics_mode='embed',
+        )
+        self.assertTrue(ok_tak, msg_tak)
+        info_tak = read_audio_info(tak_path)
+        self.assertEqual(info_tak['title'], 'TAK Track')
+        self.assertEqual(info_tak['artist'], 'TAK Artist')
+        self.assertEqual(info_tak['genre'], 'Rock')
+        self.assertTrue(info_tak['has_embedded_lyrics'])
+
+        # 4. MPC: APEv2 标签与歌词
+        ok_mpc, msg_mpc = apply_track_repairs(
+            mpc_path,
+            tag_updates={'title': 'MPC Track', 'artist': 'MPC Artist', 'album': 'MPC Album'},
+            lyrics='[00:03.00]MPC Lyrics Line',
+            lyrics_mode='embed',
+        )
+        self.assertTrue(ok_mpc, msg_mpc)
+        info_mpc = read_audio_info(mpc_path)
+        self.assertEqual(info_mpc['title'], 'MPC Track')
+        self.assertEqual(info_mpc['artist'], 'MPC Artist')
+        self.assertTrue(info_mpc['has_embedded_lyrics'])
+
+        # 局部字段删除测试
+        ok_del, _ = apply_track_deletions(dsf_path, {'composer', 'lyricist', 'arranger'})
+        self.assertTrue(ok_del)
+        info_dsf2 = read_audio_info(dsf_path)
+        self.assertEqual(info_dsf2['composer'], '')
+        self.assertEqual(info_dsf2['lyricist'], '')
+        self.assertEqual(info_dsf2['arranger'], '')
+        self.assertEqual(info_dsf2['title'], 'DSF Track')
+
+        ok_del_tak, _ = apply_track_deletions(tak_path, {'genre'})
+        self.assertTrue(ok_del_tak)
+        info_tak2 = read_audio_info(tak_path)
+        self.assertEqual(info_tak2['genre'], '')
+        self.assertEqual(info_tak2['title'], 'TAK Track')
+
+    def test_id3_multiple_comments_dedup_and_foobar_sync(self):
+        """测试 MP3 同时包含标准 COMM 与 ID3v1 Comment 时的注释去重与 foobar 同步判定。"""
+        mp3_path = self._make_minimal_mp3('multi_comm.mp3')
+        id3 = ID3()
+        # 添加标准 ID3v2 注释和 ID3v1 兼容注释副本
+        id3.add(COMM(encoding=0, lang='eng', desc='ID3v1 Comment', text=['EAC FLAC -8']))
+        id3.add(COMM(encoding=1, lang='eng', desc='', text=['EAC FLAC -8']))
+        id3.save(mp3_path)
+
+        info = read_audio_info(mp3_path)
+        # 应该只返回单份去重后的注释，而不是逗号拼接的双份 'EAC FLAC -8, EAC FLAC -8'
+        self.assertEqual(info['comment'], 'EAC FLAC -8')
+
+        st = os.stat(mp3_path)
+        # 模拟 foobar metadb 中记录的 comment 单值
+        fb_entry = {
+            'tracknumber': '',
+            'size': st.st_size,
+            'mtime': st.st_mtime,
+            'title': '',
+            'album': '',
+            'artist': '',
+            'albumartist': '',
+            'date': '',
+            'composer': '',
+            'performer': '',
+            'genre': '',
+            'discnumber': '',
+            'comment': 'EAC FLAC -8',
+        }
+        diffs = find_foobar_cache_diffs(info, fb_entry, st.st_size, st.st_mtime, True, True)
+        self.assertNotIn('注释未同步', diffs)
+
+    def test_dff_sniff_and_read_only_protection(self):
+        dff_path = self._make_minimal_dff('sample.dff')
+        self.assertEqual(sniff_container(dff_path), 'dff')
+
+        info = read_audio_info(dff_path)
+        self.assertEqual(info['container'], 'dff')
+        self.assertGreater(info['duration'], 0.0)
+        self.assertIsNone(info['error'])
+
+        # 测试在 DFF 实体文件上内嵌写标被安全拦截
+        ok, msg = write_tracknumber(dff_path, 1)
+        self.assertFalse(ok)
+        self.assertIn('DFF 格式遵循发烧规范保护', msg)
+
+        # 测试外挂歌词正常生效
+        ok_lrc, _ = write_lrc_file(dff_path, '[00:01.00]DFF External Lyric Line', title='DFF Title')
+        self.assertTrue(ok_lrc)
+        info2 = read_audio_info(dff_path)
+        self.assertTrue(info2['has_lrc_file'])
+        self.assertFalse(info2['has_embedded_lyrics'])
+
+        # 测试通过 apply_track_repairs 补全 DFF 歌词（模式为 both 时平滑写入外置 .lrc，不触发内嵌写标拦截）
+        dff_p2 = self._make_minimal_dff('song_both.dff')
+        ok_both, msg_both = apply_track_repairs(
+            dff_p2,
+            lyrics='[00:02.00]Both Lyric Line',
+            lyrics_mode='both',
+            lrc_title='Both Title',
+            lrc_artist='Both Artist',
+        )
+        self.assertTrue(ok_both)
+        self.assertIn('.lrc', msg_both)
+        info_both = read_audio_info(dff_p2)
+        self.assertTrue(info_both['has_lrc_file'])
+        self.assertFalse(info_both['has_embedded_lyrics'])
+        self.assertTrue(info_both['has_lyrics'])
+        lrc_both_content = read_lrc_file(dff_p2)
+        self.assertIn('[ti:Both Title]', lrc_both_content)
+        self.assertIn('[ar:Both Artist]', lrc_both_content)
+        self.assertIn('[00:02.00]Both Lyric Line', lrc_both_content)
+
+        # 测试模式为 embed 时平滑降级写入外置 .lrc
+        dff_p3 = self._make_minimal_dff('song_embed.dff')
+        ok_emb, _ = apply_track_repairs(dff_p3, lyrics='[00:03.00]Embed Fallback', lyrics_mode='embed')
+        self.assertTrue(ok_emb)
+        info_emb = read_audio_info(dff_p3)
+        self.assertTrue(info_emb['has_lrc_file'])
+        self.assertFalse(info_emb['has_embedded_lyrics'])
+
+        # 测试同时传入不可写标签与歌词时，外置 .lrc 依然能被成功写入并给出保护提示
+        dff_p4 = self._make_minimal_dff('song_mixed.dff')
+        ok_mix, msg_mix = apply_track_repairs(
+            dff_p4,
+            tag_updates={'artist': '邓丽君'},
+            lyrics='[00:04.00]Mixed Lyric',
+            lyrics_mode='both',
+        )
+        self.assertTrue(ok_mix)
+        self.assertIn('跳过', msg_mix)
+        info_mix = read_audio_info(dff_p4)
+        self.assertTrue(info_mix['has_lrc_file'])
+
+        # 测试在无歌词且仅传入标签时依然严格拦截
+        dff_p5 = self._make_minimal_dff('song_tag_only.dff')
+        ok_tag, msg_tag = apply_track_repairs(dff_p5, tag_updates={'artist': '邓丽君'})
+        self.assertFalse(ok_tag)
+        self.assertIn('DFF 格式遵循发烧规范保护', msg_tag)
+
+    def test_dff_to_dsf_lossless_remux_and_convert(self):
+        dff_path = self._make_minimal_dff('song.dff')
+        from mutagen.dsdiff import DSDIFF
+        dff = DSDIFF(dff_path)
+        dff.add_tags()
+        dff.tags.add(TIT2(encoding=3, text=['DFF Original Title']))
+        dff.tags.add(TPE1(encoding=3, text=['DFF Original Artist']))
+        dff.save()
+
+        # 生成同名外置歌词
+        write_lrc_file(dff_path, '[00:01.00]DFF Lyric', title='DFF Original Title')
+
+        # 执行 DFF ➜ DSF 极速无损转封装
+        ok, msg, dsf_path = convert_audio_file(dff_path, 'dsf', overwrite=True, copy_sidecar_lrc=True)
+        self.assertTrue(ok, msg)
+        self.assertTrue(os.path.isfile(dsf_path))
+
+        # 校验生成的 DSF 信息与继承的元数据
+        info_dsf = read_audio_info(dsf_path)
+        self.assertEqual(info_dsf['container'], 'dsf')
+        self.assertEqual(info_dsf['title'], 'DFF Original Title')
+        self.assertEqual(info_dsf['artist'], 'DFF Original Artist')
+        self.assertTrue(info_dsf['has_lrc_file'])
+        self.assertGreater(info_dsf['duration'], 0.0)
+
+        # 校验转为 DSF 后解锁完整内嵌能力
+        ok_tn, _ = write_tracknumber(dsf_path, 5)
+        self.assertTrue(ok_tn)
+        cov_bytes = self._make_jpeg_bytes(100, 100)
+        ok_art, _ = apply_track_repairs(dsf_path, cover_bytes=cov_bytes)
+        self.assertTrue(ok_art)
+
+        info_dsf_after = read_audio_info(dsf_path)
+        self.assertEqual(info_dsf_after['track_int'], 5)
+        self.assertGreaterEqual(len(info_dsf_after['pics']), 1)
+
+    def test_mp4_lyricist_and_arranger_freeform_atoms(self):
+        """测试 MP4/M4A 容器下 lyricist 与 arranger 自由原子标签的安全写入与删除（避免 str 拼接 bytes 异常）。"""
+        from mutagen.mp4 import MP4Tags
+        from services.art.writer import apply_tag_field, delete_tag_field_from_audio
+
+        class MockMP4Audio:
+            def __init__(self):
+                self.tags = MP4Tags()
+
+        aud = MockMP4Audio()
+        self.assertTrue(apply_tag_field(aud, 'mp4', 'lyricist', '郑容和, 林俊杰'))
+        self.assertTrue(apply_tag_field(aud, 'mp4', 'arranger', '郑容和, 李尚浩'))
+        self.assertEqual(aud.tags.get('----:com.apple.iTunes:LYRICIST'), ['郑容和, 林俊杰'.encode('utf-8')])
+        self.assertEqual(aud.tags.get('----:com.apple.iTunes:ARRANGER'), ['郑容和, 李尚浩'.encode('utf-8')])
+
+        self.assertTrue(delete_tag_field_from_audio(aud, 'mp4', 'lyricist'))
+        self.assertTrue(delete_tag_field_from_audio(aud, 'mp4', 'arranger'))
+        self.assertNotIn('----:com.apple.iTunes:LYRICIST', aud.tags)
+        self.assertNotIn('----:com.apple.iTunes:ARRANGER', aud.tags)
 
 
 if __name__ == '__main__':

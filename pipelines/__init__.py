@@ -6,18 +6,22 @@ from pipelines.options import (
     ConvertOptions,
     DeleteOptions,
     FixOptions,
+    SacdExtractOptions,
     SetOptions,
+    ZhConvertOptions,
     default_checked,
     parse_delete_fields,
 )
 from pipelines.executor import (
     _run_pool_cancellable,
-    _sync_foobar_targets,
+    _sync_player_targets,
     resolve_hook,
 )
 from pipelines.delete import _count_deletable_targets, execute_deletions
 from pipelines.set_tags import execute_set_tags
 from pipelines.convert import execute_convert
+from pipelines.sacd_pipeline import execute_sacd_pipeline
+from pipelines.zh_convert import execute_zh_convert
 from pipelines.repair import (
     FOLDER_COVER_LABELS,
     _album_date_group_key,
@@ -31,16 +35,20 @@ __all__ = [
     'ConvertOptions',
     'DeleteOptions',
     'FixOptions',
+    'SacdExtractOptions',
     'SetOptions',
+    'ZhConvertOptions',
     'default_checked',
     'parse_delete_fields',
     '_run_pool_cancellable',
-    '_sync_foobar_targets',
+    '_sync_player_targets',
     'resolve_hook',
     '_count_deletable_targets',
     'execute_deletions',
     'execute_set_tags',
     'execute_convert',
+    'execute_sacd_pipeline',
+    'execute_zh_convert',
     'FOLDER_COVER_LABELS',
     '_album_date_group_key',
     '_download_and_apply_online_artist_pics',

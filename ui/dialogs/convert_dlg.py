@@ -17,7 +17,14 @@ from ui.dialogs.base import _ModalDialog, _msgbox
 class ConvertFormatDialog(_ModalDialog):
     """音频格式批量转换设置弹窗（依赖 ffmpeg）。"""
 
-    def __init__(self, parent: tk.Misc, targets: list[LibraryTrack], default_sync: bool = True, *, has_foobar: bool = True):
+    def __init__(
+        self,
+        parent: tk.Misc,
+        targets: list[LibraryTrack],
+        default_sync: bool = True,
+        *,
+        has_player: bool = True,
+    ):
         self.targets = targets
         super().__init__(parent, '转换音频格式')
 
@@ -41,8 +48,8 @@ class ConvertFormatDialog(_ModalDialog):
         self.var_dry_run = tk.BooleanVar(value=False)
         ttk.Checkbutton(opt_frm, text='覆盖已存在的目标文件', variable=self.var_overwrite).pack(anchor='w', pady=2)
         ttk.Checkbutton(opt_frm, text='转换并校验成功后删除源文件（谨慎勾选）', variable=self.var_delete_source).pack(anchor='w', pady=2)
-        self.chk_sync = ttk.Checkbutton(opt_frm, text='转换后刷新 foobar2000 缓存', variable=self.var_sync)
-        if has_foobar:
+        self.chk_sync = ttk.Checkbutton(opt_frm, text='转换后刷新播放器缓存', variable=self.var_sync)
+        if has_player:
             self.chk_sync.pack(anchor='w', pady=2)
         ttk.Checkbutton(opt_frm, text='仅预演（预览转换结果，不执行转码）', variable=self.var_dry_run).pack(anchor='w', pady=2)
 
